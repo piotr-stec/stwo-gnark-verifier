@@ -80,6 +80,17 @@ func NewChannel(api frontend.API) *Channel {
 	}
 }
 
+// InitializeWith initializes the channel with a specific digest and nDraws
+// This is analogous to Solidity's initializeWith for generic verification
+func (c *Channel) InitializeWith(digest [8]uints.U32, nDraws frontend.Variable) {
+	// Use digest directly as Blake2sHash (already in correct format)
+	c.digest = digest
+	c.channelTime = TranscriptTime{
+		nChallenges: uints.NewU32(0),
+		nSent:       c.uapi.ValueOf(nDraws),
+	}
+}
+
 // ╔══════════════════════════════════╗
 // ║           Mix Operations         ║
 // ╚══════════════════════════════════╝

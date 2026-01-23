@@ -27,6 +27,7 @@ type FriVerifier struct {
 	FirstLayerVerifier  FriFirstLayerVerifier
 	InnerLayerVerifiers []FriInnerLayerVerifier
 	LastLayerPoly       circle.LinePoly
+	lastLayerDomain     circle.LineDomain
 
 	circuitData variables.CircuitData
 }
@@ -71,6 +72,10 @@ func NewFriVerifier(api frontend.API, uapi *uints.BinaryField[uints.U32], channe
 	// Mix in the last layer
 	channelChip.MixFelts(friProof.LastLayerPoly.Coeffs)
 
+	// Create last layer domain (matches Solidity: friVerifierState.lastLayerDomain)
+	lastLayerDomainLogSize := api.Add(friConfig.LogLastLayerDegreeBound, friConfig.LogBlowupFactor)
+	lastLayerDomain := circle.NewLineDomain(circle.NewCoset(circleChip, circle.SubgroupGenerator(circleChip, api.Add(lastLayerDomainLogSize, 2)), lastLayerDomainLogSize))
+
 	return &FriVerifier{
 		api:                 api,
 		uapi:                uapi,
@@ -81,6 +86,7 @@ func NewFriVerifier(api frontend.API, uapi *uints.BinaryField[uints.U32], channe
 		FirstLayerVerifier:  firstLayerVerifier,
 		InnerLayerVerifiers: innerLayerVerifiers,
 		LastLayerPoly:       friProof.LastLayerPoly,
+		lastLayerDomain:     lastLayerDomain,
 		circuitData:         circuitData,
 	}
 }
@@ -89,7 +95,9 @@ func NewFriVerifier(api frontend.API, uapi *uints.BinaryField[uints.U32], channe
 func (f *FriVerifier) Verify(queries []logderivlookup.Table, evaluations []logderivlookup.Table) {
 	firstLayerEvaluations := f.verifyFirstLayer(queries, evaluations)
 	lastEvaluations := f.verifyInnerLayers(queries, firstLayerEvaluations)
-	f.verifyLastLayer(lastEvaluations)
+	// Get last layer queries (queries at log size 1)
+	lastLayerQueries := f.getLastLayerQueries(queries[1])
+	f.verifyLastLayer(lastEvaluations, lastLayerQueries)
 }
 
 // ╔══════════════════════════════════╗
@@ -527,11 +535,33 @@ func (f *FriVerifier) verifyInnerLayers(queries []logderivlookup.Table, firstLay
 // ╚══════════════════════════════════╝
 
 // Verifies that the last layer evaluations are equal to the last layer polynomial coefficients
-// This assumes the last layer is a constant polynomial
-func (f *FriVerifier) verifyLastLayer(lastEvaluations []m31.QM31) {
-	for _, eval := range lastEvaluations {
-		f.qm31Chip.AssertEqual(eval, f.LastLayerPoly.Coeffs[0])
+// Matches Solidity decommitLastLayer implementation (line 1785-1827)
+func (f *FriVerifier) verifyLastLayer(lastEvaluations []m31.QM31, queryPositions []uints.U32) {
+	domain := f.lastLayerDomain.Coset()
+	for i, eval := range lastEvaluations {
+		// Get domain point at query position (matches Solidity: domain.at(query_position))
+		// LineDomain.at() returns M31 x-coordinate
+		queryInitialLE := uints.U32{queryPositions[i][3], queryPositions[i][2], queryPositions[i][1], queryPositions[i][0]}
+		domainPointM31 := domain.IndexAt(queryInitialLE).Point().X
+		// Convert M31 to QM31 for polynomial evaluation
+		x := m31.NewQM31FromM31(domainPointM31)
+		// Evaluate polynomial at point (matches Solidity: evaluatePolynomialAtPoint)
+		expectedEval := f.LastLayerPoly.EvalAt(f.qm31Chip, x)
+		f.qm31Chip.AssertEqual(eval, expectedEval)
 	}
+}
+
+// getLastLayerQueries extracts query positions from last layer query table
+func (f *FriVerifier) getLastLayerQueries(lastLayerQueryTable logderivlookup.Table) []uints.U32 {
+	// Extract query positions for last layer
+	nQueries := f.circuitData.DedupedQueriesShape[0] // queries at log size 1
+	queries := make([]uints.U32, nQueries)
+	for i := 0; i < nQueries; i++ {
+		queryVar := lastLayerQueryTable.Lookup(frontend.Variable(i))[0]
+		queryU32 := f.uapi.ValueOf(queryVar)
+		queries[i] = queryU32
+	}
+	return queries
 }
 
 // ╔══════════════════════════════════╗

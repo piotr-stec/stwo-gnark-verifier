@@ -321,13 +321,14 @@ type ComponentClaimedSumEntry struct {
 
 // StarkProofRaw mirrors the serialized Stark proof payload emitted by the prover.
 type StarkProofRaw struct {
-	Config        json.RawMessage         `json:"config"`
-	Commitments   [][]uint8               `json:"commitments"`
-	Decommitments []MerkleDecommitmentRaw `json:"decommitments"`
-	FriProof      FriProofRaw             `json:"fri_proof"`
-	ProofOfWork   uint64                  `json:"proof_of_work"`
-	QueriedValues [][]uint64              `json:"queried_values"`
-	SampledValues SampledValuesRaw        `json:"sampled_values"`
+	Config          json.RawMessage         `json:"config"`
+	Commitments     [][]uint8               `json:"commitments"`
+	Decommitments   []MerkleDecommitmentRaw `json:"decommitments"`
+	FriProof        FriProofRaw             `json:"fri_proof"`
+	ProofOfWork     uint64                  `json:"proof_of_work"`
+	QueriedValues   [][]uint64              `json:"queried_values"`
+	SampledValues   SampledValuesRaw        `json:"sampled_values"`
+	CompositionPoly *CompositionPolyRaw     `json:"composition_poly,omitempty"`
 }
 
 // SampledValuesRaw stores the sampled values grouped by table, column and evaluation.
@@ -349,8 +350,8 @@ type MerkleDecommitmentRaw struct {
 
 // FriProofRaw mirrors the serialized FRI proof payload.
 type FriProofRaw struct {
-	FirstLayerProof  FriLayerProofRaw   `json:"first_layer"`
-	InnerLayerProofs []FriLayerProofRaw `json:"inner_layers"`
+	FirstLayerProof  FriLayerProofRaw   `json:"first_layer_proof"`
+	InnerLayerProofs []FriLayerProofRaw `json:"inner_layer_proofs"`
 	LastLayerPoly    LinePolyRaw        `json:"last_layer_poly"`
 }
 
@@ -365,4 +366,13 @@ type FriLayerProofRaw struct {
 type LinePolyRaw struct {
 	Coeffs  [][][]uint64 `json:"coeffs"`
 	LogSize uint8        `json:"log_size"`
+}
+
+// CompositionPolyRaw mirrors the serialized composition polynomial payload
+// Contains 4 arrays of M31 coefficients for the secure circle polynomial
+type CompositionPolyRaw struct {
+	Coeffs0 []uint64 `json:"coeffs0"`
+	Coeffs1 []uint64 `json:"coeffs1"`
+	Coeffs2 []uint64 `json:"coeffs2"`
+	Coeffs3 []uint64 `json:"coeffs3"`
 }

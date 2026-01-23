@@ -2,7 +2,6 @@ package fri
 
 import (
 	"github.com/HerodotusDev/stwo-gnark-verifier/channel"
-	"github.com/HerodotusDev/stwo-gnark-verifier/components/cairo_components"
 	"github.com/HerodotusDev/stwo-gnark-verifier/utils"
 	"github.com/HerodotusDev/stwo-gnark-verifier/variables"
 	"github.com/consensys/gnark/frontend"
@@ -14,7 +13,7 @@ type CommitmentSchemeVerifier struct {
 	api         frontend.API
 	uapi        *uints.BinaryField[uints.U32]
 	PcsConfig   variables.PcsConfig
-	Trees       [cairo_components.N_TREES]*MerkleVerifier
+	Trees       []*MerkleVerifier
 	circuitData variables.CircuitData
 }
 
@@ -26,6 +25,50 @@ func NewCommitmentSchemeVerifier(api frontend.API, uapi *uints.BinaryField[uints
 		PcsConfig:   pcsConfig,
 		circuitData: circuitData,
 	}
+}
+
+// NewCommitmentSchemeVerifierGeneric initializes the commitment scheme verifier with generic parameters
+// This version accepts tree roots and column log sizes directly, making it independent of CircuitData
+func NewCommitmentSchemeVerifierGeneric(
+	api frontend.API,
+	uapi *uints.BinaryField[uints.U32],
+	channel *channel.Channel,
+	pcsConfig variables.PcsConfig,
+	treeRoots [][32]uints.U8,
+	treeColumnLogSizes [][]frontend.Variable,
+) *CommitmentSchemeVerifier {
+	numTrees := len(treeRoots)
+	verifier := &CommitmentSchemeVerifier{
+		api:       api,
+		uapi:      uapi,
+		PcsConfig: pcsConfig,
+		Trees:     make([]*MerkleVerifier, numTrees),
+		// circuitData will be populated dynamically from provided data
+		circuitData: variables.CircuitData{
+			BoundsLength: len(treeColumnLogSizes), // Approximate, will be recalculated
+		},
+	}
+
+	// Initialize trees with provided roots and column log sizes
+	for treeIndex := 0; treeIndex < numTrees; treeIndex++ {
+		if treeIndex < len(treeColumnLogSizes) {
+			// Mix root into channel
+			channel.MixRootBytes(treeRoots[treeIndex][:])
+
+			// Blowup log sizes
+			columnLogSizes := utils.BlowupLogSizes(api, treeColumnLogSizes[treeIndex], pcsConfig.FriConfig.LogBlowupFactor)
+
+			// For generic case, assume each column has its own domain (nDomainPerLogSize based on column count)
+			nDomainPerLogSize := make([]int, len(treeColumnLogSizes[treeIndex])+1)
+			for i := range treeColumnLogSizes[treeIndex] {
+				nDomainPerLogSize[i+1] = 1 // Each column in its own domain (generic assumption)
+			}
+
+			verifier.Trees[treeIndex] = NewMerkleVerifier(api, uapi, treeRoots[treeIndex], columnLogSizes, nDomainPerLogSize)
+		}
+	}
+
+	return verifier
 }
 
 // Commit mixes the Merkle root into the channel and stores the verifier for the tree.
@@ -50,8 +93,11 @@ func (v *CommitmentSchemeVerifier) Commit(treeIndex int, root [32]uints.U8, logS
 
 // ColumnLogSizes returns the column log sizes for the given tree (and optionally blew up)
 func (v *CommitmentSchemeVerifier) ColumnLogSizes(blowup bool) [][]frontend.Variable {
-	columnLogSizes := make([][]frontend.Variable, 4)
+	columnLogSizes := make([][]frontend.Variable, len(v.Trees))
 	for treeIndex, merkleVerifier := range v.Trees {
+		if merkleVerifier == nil {
+			continue // Skip uninitialized trees
+		}
 		if blowup {
 			blewupColumnLogSizes := make([]frontend.Variable, len(merkleVerifier.ColumnLogSizes))
 			for i, logSize := range merkleVerifier.ColumnLogSizes {

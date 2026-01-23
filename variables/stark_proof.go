@@ -12,6 +12,7 @@ import (
 
 // StarkProof is the proof emitted by the Stwo Backend
 type StarkProof struct {
+	Config PcsConfig
 	// Commitments are the four commmitment roots. len(Commitments) = 4.
 	Commitments [][32]uints.U8
 	// SampledValues are the sampled values for each column of each tree.
@@ -28,6 +29,9 @@ type StarkProof struct {
 	FriProof FriProof
 	// ProofOfWork is the FRI proof of work (done by the prover after committing to the FRI layers)
 	ProofOfWork uints.U64
+	// CompositionPoly is the composition polynomial used to verify constraints
+	// This makes the verifier generic and not tied to specific AIR implementations
+	CompositionPoly circle.SecureCirclePoly
 }
 
 // MerkleDecommitment stores the witness bytes and column values emitted by the prover.
@@ -70,13 +74,16 @@ func BuildStarkProof(starkProofRaw *StarkProofRaw) StarkProof {
 		return StarkProof{}
 	}
 
+	compositionPoly := buildCompositionPoly(starkProofRaw.CompositionPoly)
+
 	return StarkProof{
-		Commitments:   buildCommitments(starkProofRaw.Commitments),
-		SampledValues: buildSampledValues(starkProofRaw.SampledValues),
-		QueriedValues: buildQueriedValues(starkProofRaw.QueriedValues),
-		Decommitments: buildDecommitments(starkProofRaw.Decommitments),
-		FriProof:      buildFriProof(starkProofRaw.FriProof),
-		ProofOfWork:   uints.NewU64(starkProofRaw.ProofOfWork),
+		Commitments:     buildCommitments(starkProofRaw.Commitments),
+		SampledValues:   buildSampledValues(starkProofRaw.SampledValues),
+		QueriedValues:   buildQueriedValues(starkProofRaw.QueriedValues),
+		Decommitments:   buildDecommitments(starkProofRaw.Decommitments),
+		FriProof:        buildFriProof(starkProofRaw.FriProof),
+		ProofOfWork:     uints.NewU64(starkProofRaw.ProofOfWork),
+		CompositionPoly: compositionPoly,
 	}
 }
 
@@ -222,4 +229,23 @@ func buildLastLayerPoly(raw LinePolyRaw) circle.LinePoly {
 		Coeffs:  []m31.QM31{coeffs},
 		LogSize: uints.NewU8(raw.LogSize),
 	}
+}
+
+func buildCompositionPoly(raw *CompositionPolyRaw) circle.SecureCirclePoly {
+	if raw == nil {
+		// Return empty polynomial if not provided (for backward compatibility)
+		return circle.SecureCirclePoly{
+			Coeffs0: []m31.M31{},
+			Coeffs1: []m31.M31{},
+			Coeffs2: []m31.M31{},
+			Coeffs3: []m31.M31{},
+		}
+	}
+
+	return circle.NewSecureCirclePoly(
+		convertUintSliceToM31(raw.Coeffs0),
+		convertUintSliceToM31(raw.Coeffs1),
+		convertUintSliceToM31(raw.Coeffs2),
+		convertUintSliceToM31(raw.Coeffs3),
+	)
 }
