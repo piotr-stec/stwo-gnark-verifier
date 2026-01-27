@@ -40,3 +40,8 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+contracts
+params.json
+proof.json
+crates

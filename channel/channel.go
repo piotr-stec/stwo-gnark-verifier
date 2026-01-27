@@ -4,6 +4,8 @@
 package channel
 
 import (
+	"encoding/hex"
+	"fmt"
 	"math/big"
 
 	"github.com/HerodotusDev/stwo-gnark-verifier/blake2s"
@@ -82,13 +84,44 @@ func NewChannel(api frontend.API) *Channel {
 
 // InitializeWith initializes the channel with a specific digest and nDraws
 // This is analogous to Solidity's initializeWith for generic verification
-func (c *Channel) InitializeWith(digest [8]uints.U32, nDraws frontend.Variable) {
+func (c *Channel) InitializeWith(digest [8]frontend.Variable, nDraws frontend.Variable) {
+	// Convert digest from frontend.Variable to uints.U32
+	var digestU32 [8]uints.U32
+	for i := 0; i < 8; i++ {
+		digestU32[i] = c.uapi.ValueOf(digest[i])
+	}
+
+	// DEBUG: Print incoming digest in hex
+	bytes := make([]byte, 32)
+	for i := 0; i < 8; i++ {
+		word := digestU32[i]
+		for j := 0; j < 4; j++ {
+			val := word[j].Val
+			var byteVal byte
+			switch v := val.(type) {
+			case int:
+				byteVal = byte(v)
+			case *big.Int:
+				byteVal = byte(v.Uint64())
+			case uint64:
+				byteVal = byte(v)
+			default:
+				byteVal = 0
+			}
+			bytes[i*4+j] = byteVal
+		}
+	}
+	fmt.Printf("DEBUG InitializeWith: incoming digest = 0x%s\n", hex.EncodeToString(bytes))
+
 	// Use digest directly as Blake2sHash (already in correct format)
-	c.digest = digest
+	c.digest = digestU32
 	c.channelTime = TranscriptTime{
 		nChallenges: uints.NewU32(0),
 		nSent:       c.uapi.ValueOf(nDraws),
 	}
+
+	// DEBUG: Print after initialization
+	c.DebugPrint("After initialization")
 }
 
 // ╔══════════════════════════════════╗
@@ -107,6 +140,27 @@ func (c *Channel) MixRootBytes(root []uints.U8) {
 	msg := c.hashToBytes(c.digest)
 	msg = append(msg, root...)
 	c.updateDigest(c.computeDigest(msg))
+}
+
+// MixRootBytesVar mixes root bytes from frontend.Variable slice into the digest
+func (c *Channel) MixRootBytesVar(rootVar []frontend.Variable) {
+	// DEBUG: Check incoming values
+	fmt.Printf("DEBUG MixRootBytesVar: len(rootVar)=%d, rootVar[0]=%v, rootVar[1]=%v\n", len(rootVar), rootVar[0], rootVar[1])
+
+	// Convert frontend.Variable to uints.U8
+	bapi, err := uints.NewBytes(c.api)
+	if err != nil {
+		panic(err)
+	}
+	root := make([]uints.U8, len(rootVar))
+	for i, v := range rootVar {
+		root[i] = bapi.ValueOf(v)
+	}
+
+	// DEBUG: Check converted values
+	fmt.Printf("DEBUG MixRootBytesVar after convert: root[0]=%v, root[1]=%v\n", root[0], root[1])
+
+	c.MixRootBytes(root)
 }
 
 // MixFelts absorbs secure field elements into the digest.
@@ -180,17 +234,74 @@ func (c *Channel) DrawRandomBytes() []uints.U8 {
 // MixAndCheckPowNonce mixes a nonce and checks the leading zero bits.
 func (c *Channel) MixAndCheckPowNonce(nonce uints.U64, interactionPowBits int) {
 	c.MixU64(nonce)
-	checkProofOfWork(c.uapi, c.digest, interactionPowBits)
+	c.checkProofOfWork(nonce, interactionPowBits)
 }
 
-// checkProofOfWork verifies that the digest has the required leading zeros.
-// Is is assumed that InteractionPowBits is a constant less than 32.
-// Runs a 32-InteractionPowBits RC in big endian order.
-func checkProofOfWork(uapi *uints.BinaryField[uints.U32], digest Blake2sHash, interactionPowBits int) {
-	lsw := digest[0]
-	mask := uints.NewU32((1 << interactionPowBits) - 1)
-	masked := uapi.And(lsw, mask)
-	uapi.AssertEq(masked, uints.NewU32(0))
+// CheckPowNonce verifies the proof of work without mixing the nonce.
+// This matches Rust's verify_pow_nonce implementation:
+// 1. Computes H1 = Hash(POW_PREFIX || [0; 24] || digest || n_bits)
+// 2. Computes H2 = Hash(H1 || nonce)
+// 3. Checks that H2 has at least n_bits trailing zeros
+func (c *Channel) CheckPowNonce(nonce uints.U64, interactionPowBits int) {
+	c.checkProofOfWork(nonce, interactionPowBits)
+}
+
+// checkProofOfWork implements the proof of work verification matching Rust's verify_pow_nonce.
+// Verifies that H(H(POW_PREFIX, [0_u8; 24], digest, n_bits), nonce) has at least n_bits trailing zeros.
+func (c *Channel) checkProofOfWork(nonce uints.U64, nBits int) {
+	const POW_PREFIX uint32 = 0x12345678
+
+	// Step 1: Compute H(POW_PREFIX, [0; 24], digest, n_bits)
+	msg1 := make([]uints.U8, 0, 4+24+32+4)
+
+	// Add POW_PREFIX (4 bytes, little-endian)
+	powPrefixU32 := uints.NewU32(POW_PREFIX)
+	msg1 = append(msg1, c.uapi.UnpackLSB(powPrefixU32)...)
+
+	// Add 24 zero bytes
+	for i := 0; i < 24; i++ {
+		msg1 = append(msg1, uints.NewU8(0))
+	}
+
+	// Add current digest (32 bytes)
+	msg1 = append(msg1, c.hashToBytes(c.digest)...)
+
+	// Add n_bits (4 bytes, little-endian u32)
+	nBitsU32 := uints.NewU32(uint32(nBits))
+	msg1 = append(msg1, c.uapi.UnpackLSB(nBitsU32)...)
+
+	prefixedDigest := c.computeDigest(msg1)
+
+	// Step 2: Compute H(prefixed_digest, nonce)
+	msg2 := c.hashToBytes(prefixedDigest)
+	// nonce is U64 = [8]U8, append all 8 bytes
+	for i := 0; i < 8; i++ {
+		msg2 = append(msg2, nonce[i])
+	}
+
+	result := c.computeDigest(msg2)
+
+	// Step 3: Check trailing zeros
+	// The result is 32 bytes = 256 bits
+	// We need to check if the first n_bits are zero (in little-endian byte order)
+	// This means checking trailing zeros when interpreted as u128/u256 little-endian
+
+	// For simplicity, check the required number of bits in the first words
+	bitsToCheck := nBits
+	for i := 0; i < 8 && bitsToCheck > 0; i++ {
+		word := result[i]
+		if bitsToCheck >= 32 {
+			// Entire word must be zero
+			c.uapi.AssertEq(word, uints.NewU32(0))
+			bitsToCheck -= 32
+		} else {
+			// Only some bits of this word must be zero
+			mask := uints.NewU32((1 << bitsToCheck) - 1)
+			masked := c.uapi.And(word, mask)
+			c.uapi.AssertEq(masked, uints.NewU32(0))
+			bitsToCheck = 0
+		}
+	}
 }
 
 // ╔══════════════════════════════════╗
@@ -247,10 +358,7 @@ func (c *Channel) drawRandomWords() Blake2sHash {
 	msg := c.hashToBytes(c.digest)
 	msg = append(msg, c.uapi.UnpackLSB(c.channelTime.nSent)...)
 
-	zeroWord := uints.NewU32(0)
-	for i := 0; i < 7; i++ {
-		msg = append(msg, c.uapi.UnpackLSB(zeroWord)...)
-	}
+	msg = append(msg, uints.NewU8(0))
 
 	c.channelTime.incSent(c.uapi)
 
@@ -290,4 +398,60 @@ func zeroHash() Blake2sHash {
 		hash[i] = uints.NewU32(0)
 	}
 	return hash
+}
+
+// DebugPrint prints the current state of the channel for debugging
+func (c *Channel) DebugPrint(label string) {
+	fmt.Printf("\n=== Channel Debug: %s ===\n", label)
+
+	// Convert digest to byte array for hex encoding
+	bytes := make([]byte, 32) // 8 words * 4 bytes each
+	for i := 0; i < 8; i++ {
+		// Extract bytes from each U32 word (little-endian within word)
+		word := c.digest[i]
+		for j := 0; j < 4; j++ {
+			// Try different types that Val can be
+			val := word[j].Val
+			var byteVal byte
+			switch v := val.(type) {
+			case int:
+				byteVal = byte(v)
+			case *big.Int:
+				byteVal = byte(v.Uint64())
+			case uint64:
+				byteVal = byte(v)
+			default:
+				byteVal = 0
+			}
+			bytes[i*4+j] = byteVal
+		}
+	}
+
+	// Print as hex string (this will be in little-endian word order)
+	fmt.Printf("Digest: 0x%s\n", hex.EncodeToString(bytes))
+
+	// Also print in big-endian order for comparison with reference implementations
+	bytesReversed := make([]byte, 32)
+	for i := 0; i < 8; i++ {
+		word := c.digest[7-i]
+		for j := 0; j < 4; j++ {
+			val := word[3-j].Val
+			var byteVal byte
+			switch v := val.(type) {
+			case int:
+				byteVal = byte(v)
+			case *big.Int:
+				byteVal = byte(v.Uint64())
+			case uint64:
+				byteVal = byte(v)
+			default:
+				byteVal = 0
+			}
+			bytesReversed[i*4+j] = byteVal
+		}
+	}
+	fmt.Printf("Digest (big-endian): 0x%s\n", hex.EncodeToString(bytesReversed))
+
+	fmt.Printf("nChallenges: %v, nSent: %v\n", c.channelTime.nChallenges, c.channelTime.nSent)
+	fmt.Println("=====================================\n")
 }

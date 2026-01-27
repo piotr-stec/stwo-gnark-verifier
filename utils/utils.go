@@ -3,6 +3,8 @@ package utils
 // Are considered utils functions that are built directly on top of the gnark library
 
 import (
+	"math/big"
+
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/std/conversion"
 	"github.com/consensys/gnark/std/lookup/logderivlookup"
@@ -61,22 +63,51 @@ func BlowupLogSizes(api frontend.API, logSizes []frontend.Variable, blowupFactor
 	return out
 }
 
+// VariableToInt attempts to extract a constant integer value from a frontend.Variable.
+// Use with caution: only works if the variable is a constant known at compile time.
+func VariableToInt(v frontend.Variable) int {
+	if i, ok := v.(int); ok {
+		return i
+	}
+	if i, ok := v.(uint64); ok {
+		return int(i)
+	}
+	if i, ok := v.(int64); ok {
+		return int(i)
+	}
+	if b, ok := v.(*big.Int); ok {
+		return int(b.Int64())
+	}
+	// Fallback/panic if not a known constant type
+	// In strict R1CS construction, this might fail for pure variables.
+	// But verification parameters should be constant.
+	panic("VariableToInt: variable is not a constant int/big.Int")
+}
+
 // ╔══════════════════════════════════╗
 // ║           Query Utils            ║
 // ╚══════════════════════════════════╝
 
 // GenerateQueries folds the base layer queries and deduplicates them layer by layer.
 // It returns the deduplicated queries for all layers from root to leaves (exactly maxLogSize + 1 layers).
-func GenerateQueries(api frontend.API, baseLayerQueries []frontend.Variable, nQueries uint8, dedupedQueriesShape []int, maxLogSize uint8) [][]frontend.Variable {
+// bounds contains the deduplicated log sizes in descending order (maxLogSize is bounds[0])
+func GenerateQueries(api frontend.API, baseLayerQueries []frontend.Variable, nQueries uint8, bounds []int) [][]frontend.Variable {
+	if len(bounds) == 0 {
+		return nil
+	}
+	maxLogSize := bounds[0]
+
 	// initialize the queries array
 	queriesDeduped := make([][]frontend.Variable, maxLogSize+1)
 
 	// deduplicate and order the base layer queries
-	layerQueriesDeduped, err := api.Compiler().NewHint(DeduplicationHint, dedupedQueriesShape[maxLogSize], baseLayerQueries...)
+	// We use nQueries as the output size for the hint.
+	// Assumes deduplicated count <= nQueries (which is true).
+	layerQueriesDeduped, err := api.Compiler().NewHint(DeduplicationHint, int(nQueries), baseLayerQueries...)
 	if err != nil {
 		panic(err)
 	}
-	layerQueriesDedupedOrdered, err := api.Compiler().NewHint(AscendingOrderHint, dedupedQueriesShape[maxLogSize], layerQueriesDeduped...)
+	layerQueriesDedupedOrdered, err := api.Compiler().NewHint(AscendingOrderHint, int(nQueries), layerQueriesDeduped...)
 	if err != nil {
 		panic(err)
 	}
@@ -86,7 +117,7 @@ func GenerateQueries(api frontend.API, baseLayerQueries []frontend.Variable, nQu
 
 	// build all queries above the base layer
 	for l := maxLogSize; l >= 1; l-- {
-		queriesDeduped[l-1] = FoldQueries(api, queriesDeduped[l], dedupedQueriesShape[l-1])
+		queriesDeduped[l-1] = FoldQueries(api, queriesDeduped[l], int(nQueries))
 	}
 
 	return queriesDeduped

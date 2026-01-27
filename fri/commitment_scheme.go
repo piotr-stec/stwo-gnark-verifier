@@ -1,8 +1,10 @@
 package fri
 
 import (
+	"fmt"
+	"sort"
+
 	"github.com/HerodotusDev/stwo-gnark-verifier/channel"
-	"github.com/HerodotusDev/stwo-gnark-verifier/utils"
 	"github.com/HerodotusDev/stwo-gnark-verifier/variables"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/std/math/uints"
@@ -10,120 +12,133 @@ import (
 
 // CommitmentSchemeVerifier mirrors the prover-side Merkle commitment verifier.
 type CommitmentSchemeVerifier struct {
-	api         frontend.API
-	uapi        *uints.BinaryField[uints.U32]
-	PcsConfig   variables.PcsConfig
-	Trees       []*MerkleVerifier
-	circuitData variables.CircuitData
-}
-
-// NewCommitmentSchemeVerifier initializes the commitment scheme verifier.
-func NewCommitmentSchemeVerifier(api frontend.API, uapi *uints.BinaryField[uints.U32], pcsConfig variables.PcsConfig, circuitData variables.CircuitData) *CommitmentSchemeVerifier {
-	return &CommitmentSchemeVerifier{
-		api:         api,
-		uapi:        uapi,
-		PcsConfig:   pcsConfig,
-		circuitData: circuitData,
-	}
+	api                frontend.API
+	uapi               *uints.BinaryField[uints.U32]
+	PcsConfig          variables.PcsConfig
+	Trees              []*MerkleVerifier
+	TreeColumnLogSizes [][]int // Blew up log sizes if needed? No, these are base log sizes
 }
 
 // NewCommitmentSchemeVerifierGeneric initializes the commitment scheme verifier with generic parameters
-// This version accepts tree roots and column log sizes directly, making it independent of CircuitData
+// This version accepts tree roots and column log sizes directly
 func NewCommitmentSchemeVerifierGeneric(
 	api frontend.API,
 	uapi *uints.BinaryField[uints.U32],
 	channel *channel.Channel,
 	pcsConfig variables.PcsConfig,
-	treeRoots [][32]uints.U8,
-	treeColumnLogSizes [][]frontend.Variable,
+	treeRoots [][32]frontend.Variable,
+	treeColumnLogSizes [][]int,
 ) *CommitmentSchemeVerifier {
 	numTrees := len(treeRoots)
 	verifier := &CommitmentSchemeVerifier{
-		api:       api,
-		uapi:      uapi,
-		PcsConfig: pcsConfig,
-		Trees:     make([]*MerkleVerifier, numTrees),
-		// circuitData will be populated dynamically from provided data
-		circuitData: variables.CircuitData{
-			BoundsLength: len(treeColumnLogSizes), // Approximate, will be recalculated
-		},
+		api:                api,
+		uapi:               uapi,
+		PcsConfig:          pcsConfig,
+		Trees:              make([]*MerkleVerifier, numTrees),
+		TreeColumnLogSizes: treeColumnLogSizes,
 	}
 
 	// Initialize trees with provided roots and column log sizes
 	for treeIndex := 0; treeIndex < numTrees; treeIndex++ {
 		if treeIndex < len(treeColumnLogSizes) {
-			// Mix root into channel
-			channel.MixRootBytes(treeRoots[treeIndex][:])
-
-			// Blowup log sizes
-			columnLogSizes := utils.BlowupLogSizes(api, treeColumnLogSizes[treeIndex], pcsConfig.FriConfig.LogBlowupFactor)
-
-			// For generic case, assume each column has its own domain (nDomainPerLogSize based on column count)
-			nDomainPerLogSize := make([]int, len(treeColumnLogSizes[treeIndex])+1)
-			for i := range treeColumnLogSizes[treeIndex] {
-				nDomainPerLogSize[i+1] = 1 // Each column in its own domain (generic assumption)
-			}
-
-			verifier.Trees[treeIndex] = NewMerkleVerifier(api, uapi, treeRoots[treeIndex], columnLogSizes, nDomainPerLogSize)
+			verifier.initializeTree(treeIndex, treeRoots[treeIndex], treeColumnLogSizes[treeIndex], channel)
 		}
 	}
 
 	return verifier
 }
 
+func (v *CommitmentSchemeVerifier) initializeTree(treeIndex int, rootRaw [32]frontend.Variable, logSizes []int, ch *channel.Channel) {
+	// DEBUG: Check incoming root values
+	fmt.Printf("DEBUG initializeTree START: treeIndex=%d, rootRaw[0]=%v, rootRaw[1]=%v\n", treeIndex, rootRaw[0], rootRaw[1])
+
+	// Compute blew up log sizes
+	logBlowupFactor := v.PcsConfig.FriConfig.LogBlowupFactor
+	columnLogSizes := make([]frontend.Variable, len(logSizes))
+	for i, logSize := range logSizes {
+		columnLogSizes[i] = frontend.Variable(logSize + logBlowupFactor)
+	}
+
+	// Compute nDomainPerLogSize for this tree
+	maxLogSize := 0
+	for _, ls := range logSizes {
+		if ls > maxLogSize {
+			maxLogSize = ls
+		}
+	}
+	// Blowup
+	maxLogSize += logBlowupFactor
+
+	nDomainPerLogSize := make([]int, maxLogSize+1)
+	for _, ls := range logSizes {
+		blownUpLs := ls + logBlowupFactor
+		if blownUpLs < len(nDomainPerLogSize) {
+			nDomainPerLogSize[blownUpLs]++
+		}
+	}
+
+	fmt.Printf("DEBUG initializeTree END: creating MerkleVerifier\n")
+	v.Trees[treeIndex] = NewMerkleVerifier(v.api, v.uapi, rootRaw, columnLogSizes, nDomainPerLogSize)
+}
+
 // Commit mixes the Merkle root into the channel and stores the verifier for the tree.
-func (v *CommitmentSchemeVerifier) Commit(treeIndex int, root [32]uints.U8, logSizes []frontend.Variable, ch *channel.Channel) {
+func (v *CommitmentSchemeVerifier) Commit(treeIndex int, rootRaw [32]frontend.Variable, logSizes []int, ch *channel.Channel) {
 	if treeIndex < 0 || treeIndex >= len(v.Trees) {
 		panic("invalid tree index")
 	}
 	if ch == nil {
 		panic("channel must not be nil")
 	}
+	// Mix root into channel (convert to uints.U8 first)
+	ch.MixRootBytesVar(rootRaw[:])
 
-	ch.MixRootBytes(root[:])
-	columnLogSizes := utils.BlowupLogSizes(v.api, logSizes, v.PcsConfig.FriConfig.LogBlowupFactor)
-	// NOTE: This hardcodes the blowup factor to 1 for now
-	nColumnsPerLogSize := v.circuitData.NColumnsPerLogSize[treeIndex]
-	nDomainPerLogSize := make([]int, len(nColumnsPerLogSize)+1)
-	for i, nColumns := range nColumnsPerLogSize {
-		nDomainPerLogSize[i+1] = nColumns
+	// Compute extended log sizes (with blowup) like Rust:
+	// extended_log_sizes = log_sizes.map(|&log_size| log_size + log_blowup_factor)
+	logBlowupFactor := v.PcsConfig.FriConfig.LogBlowupFactor
+	extendedLogSizes := make([]int, len(logSizes))
+	for i, logSize := range logSizes {
+		extendedLogSizes[i] = logSize + logBlowupFactor
 	}
-	v.Trees[treeIndex] = NewMerkleVerifier(v.api, v.uapi, root, columnLogSizes, nDomainPerLogSize)
+
+	// Update log sizes (store extended/blew up sizes)
+	// If TreeColumnLogSizes is too short, extend it
+	if treeIndex >= len(v.TreeColumnLogSizes) {
+		// Extend to fit
+		newLogSizes := make([][]int, treeIndex+1)
+		copy(newLogSizes, v.TreeColumnLogSizes)
+		v.TreeColumnLogSizes = newLogSizes
+	}
+	v.TreeColumnLogSizes[treeIndex] = extendedLogSizes
+
+	v.initializeTree(treeIndex, rootRaw, logSizes, ch)
 }
 
-// ColumnLogSizes returns the column log sizes for the given tree (and optionally blew up)
-func (v *CommitmentSchemeVerifier) ColumnLogSizes(blowup bool) [][]frontend.Variable {
-	columnLogSizes := make([][]frontend.Variable, len(v.Trees))
-	for treeIndex, merkleVerifier := range v.Trees {
-		if merkleVerifier == nil {
-			continue // Skip uninitialized trees
-		}
-		if blowup {
-			blewupColumnLogSizes := make([]frontend.Variable, len(merkleVerifier.ColumnLogSizes))
-			for i, logSize := range merkleVerifier.ColumnLogSizes {
-				blewupColumnLogSizes[i] = v.api.Add(logSize, v.PcsConfig.FriConfig.LogBlowupFactor)
-			}
-			columnLogSizes[treeIndex] = blewupColumnLogSizes
-		} else {
-			columnLogSizes[treeIndex] = merkleVerifier.ColumnLogSizes
-		}
-	}
-	return columnLogSizes
-}
+// Bounds returns the deduplicated and ordered column bounds (degree bounds)
+// This matches Rust's behavior:
+// 1. Flatten column_log_sizes from all trees (blew up sizes)
+// 2. Sort, reverse, dedup
+// 3. Subtract log_blowup_factor to get degree bounds
+func (v *CommitmentSchemeVerifier) Bounds() []int {
+	logBlowupFactor := v.PcsConfig.FriConfig.LogBlowupFactor
 
-// Bounds returns the deduplicated and ordered column bounds
-func (v *CommitmentSchemeVerifier) Bounds() []frontend.Variable {
-	columnLogSizes := v.ColumnLogSizes(false)
-	columnLogSizesFlattened := utils.FlattenTree(columnLogSizes)
-	dedupedLogSizes, err := v.api.Compiler().NewHint(utils.DeduplicationHint, v.circuitData.BoundsLength, columnLogSizesFlattened...)
-	if err != nil {
-		panic(err)
+	// Flatten column log sizes from all trees
+	// TreeColumnLogSizes now stores blew up sizes (after Commit fix)
+	uniqueBlownUpSizes := make(map[int]struct{})
+	for _, treeSizes := range v.TreeColumnLogSizes {
+		for _, blownUpSize := range treeSizes {
+			uniqueBlownUpSizes[blownUpSize] = struct{}{}
+		}
 	}
-	dedupedOrderedLogSizes, err := v.api.Compiler().NewHint(utils.DescendingOrderHint, v.circuitData.BoundsLength, dedupedLogSizes...)
-	if err != nil {
-		panic(err)
+
+	// Convert to slice and subtract blowup factor to get degree bounds
+	bounds := make([]int, 0, len(uniqueBlownUpSizes))
+	for blownUpSize := range uniqueBlownUpSizes {
+		degreeBound := blownUpSize - logBlowupFactor
+		bounds = append(bounds, degreeBound)
 	}
-	utils.AssertDescendingOrder(v.api, dedupedOrderedLogSizes)
-	utils.AssertPartialDeduplication(v.api, dedupedOrderedLogSizes, columnLogSizesFlattened)
-	return dedupedOrderedLogSizes
+
+	// Sort descending
+	sort.Sort(sort.Reverse(sort.IntSlice(bounds)))
+
+	return bounds
 }

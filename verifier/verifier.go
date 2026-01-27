@@ -1,6 +1,10 @@
 package verifier
 
 import (
+	"encoding/hex"
+	"fmt"
+	"math/big"
+
 	"github.com/HerodotusDev/stwo-gnark-verifier/blake2s"
 	"github.com/HerodotusDev/stwo-gnark-verifier/channel"
 	"github.com/HerodotusDev/stwo-gnark-verifier/circle"
@@ -57,8 +61,17 @@ func NewVerifierChip(api frontend.API) *VerifierChip {
 //   - proof is the STARK proof to verify (includes composition polynomial)
 //   - params contains verification parameters (components, tree info, digest, etc.)
 func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.VerificationParams) {
+	// DEBUG: Check if TreeRoots are available
+	fmt.Printf("DEBUG Verify: len(params.TreeRoots) = %d\n", len(params.TreeRoots))
+	if len(params.TreeRoots) > 0 {
+		fmt.Printf("DEBUG Verify: params.TreeRoots[0][0] = %v\n", params.TreeRoots[0][0])
+	}
+	fmt.Printf("DEBUG Verify: params.Digest[0] = %v\n", params.Digest[0])
+
 	// Initialize channel with digest and nDraws (like Solidity's initializeWith)
 	c.channel.InitializeWith(params.Digest, params.NDraws)
+
+	c.channel.DebugPrint("After initialization")
 
 	// Initialize commitment scheme verifier with tree information
 	// This already mixes all commitments (including composition poly) into the channel
@@ -66,10 +79,29 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 
 	// Draw random coefficient for OODS from channel
 	randomCoeff := c.channel.DrawFelt()
+	_ = randomCoeff
 
 	// Composition polynomial is the last tree
 	numTrees := len(proof.Commitments)
 	cpTreeIdx := numTrees - 1
+
+	// Commit to Composition Polynomial
+	// In Solidity: _performCompositionCommit
+	compositionLogDegreeBound := params.ComponentsCompositionLogDegreeBound
+	compositionSizes := []int{compositionLogDegreeBound, compositionLogDegreeBound, compositionLogDegreeBound, compositionLogDegreeBound}
+	fmt.Printf("Debug commiyment verifier log sizes: %v\n", commitmentVerifier.TreeColumnLogSizes)
+	commitmentVerifier.Commit(
+		cpTreeIdx,
+		proof.Commitments[cpTreeIdx],
+		compositionSizes,
+		c.channel,
+	)
+	fmt.Printf("Debug commiyment verifier log sizes: %v\n", commitmentVerifier.TreeColumnLogSizes)
+
+	// Debug print compostion sizes
+	fmt.Printf("DEBUG Verify: compositionSizes = %v\n", proof.Commitments[cpTreeIdx])
+	// DEBUG: Print channel state after composition commit
+	c.channel.DebugPrint("After composition commit")
 
 	// ╔══════════════════════════════════╗
 	// ║               OODS               ║
@@ -78,7 +110,13 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 	// Verify OODS: get random point and evaluate constraints
 	oodsPoint := c.circle.GetRandomPoint(c.channel)
 
+	// DEBUG: Print OODS point
+	fmt.Printf("DEBUG Verify: oodsPoint = %v\n", oodsPoint)
+
 	// Extract CP evaluation from sampled values (last tree in sampled values)
+	// SampledValues is [tree][column][point]
+	// For CP (last tree), we expect 4 columns (secure extension degree) and 1 point (oods)
+	// SampledValues[cpTreeIdx][0][0] corresponds to column 0 at oods point
 	compositionOodsEval := c.qm31.FromPartialEvals(
 		proof.SampledValues[cpTreeIdx][0][0],
 		proof.SampledValues[cpTreeIdx][1][0],
@@ -89,10 +127,8 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 	// Evaluate composition polynomial at OODS point
 	// The composition polynomial is now part of the proof, making this generic
 	constraintsOodsEval := proof.CompositionPoly.EvalAt(c.qm31, oodsPoint)
-
 	// Verify OODS consistency
 	c.qm31.AssertEqual(compositionOodsEval, constraintsOodsEval)
-
 	// ╔══════════════════════════════════╗
 	// ║          FRI Commitment          ║
 	// ╚══════════════════════════════════╝
@@ -100,19 +136,27 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 	// Mix flatten sampled values into channel
 	flattenedSampledValues := utils.FlattenTree(utils.FlattenTree(proof.SampledValues))
 	c.channel.MixFelts(flattenedSampledValues)
+	c.channel.DebugPrint("After flattened sampled values")
 
 	// Draw random coeff for FRI
-	randomCoeff = c.channel.DrawFelt()
+	friRandomCoeff := c.channel.DrawFelt()
+
+	fmt.Printf("Debug commiyment verifier log sizes: %v\n", commitmentVerifier.TreeColumnLogSizes)
 
 	// Compute bounds (column log sizes deduped, in decreasing order and not blew up)
 	bounds := commitmentVerifier.Bounds()
-
+	fmt.Printf("bounds = %v\n", bounds)
+	c.channel.DebugPrint("Before New Fri verifier")
 
 	// Verification of commitment stage of FRI
-	friVerifier := fri.NewFriVerifier(c.api, c.uapi, c.channel, c.qm31, c.circle, commitmentVerifier.PcsConfig.FriConfig, proof.FriProof, bounds, circuitData)
+	friVerifier := fri.NewFriVerifier(c.api, c.uapi, c.channel, c.qm31, c.circle, commitmentVerifier.PcsConfig.FriConfig, proof.FriProof, bounds, commitmentVerifier.TreeColumnLogSizes)
+	c.channel.DebugPrint("After New Fri verifier")
+	fmt.Printf("DEBUG Verify: Before CheckPowNonce\n")
 
 	// Proof of work
-	c.channel.MixAndCheckPowNonce(proof.ProofOfWork, int(commitmentVerifier.PcsConfig.PowBits))
+	c.channel.CheckPowNonce(proof.ProofOfWork, int(commitmentVerifier.PcsConfig.PowBits))
+	c.channel.MixU64(proof.ProofOfWork)
+	c.channel.DebugPrint("After mix proof of work")
 
 	// ╔══════════════════════════════════╗
 	// ║              Queries             ║
@@ -121,16 +165,23 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 	// Generate base layer queries and verify they match the hinted queries
 	maxLogSize := bounds[0]
 	baseLayerQueries := c.channel.GenerateBaseLayerQueries(maxLogSize, commitmentVerifier.PcsConfig.FriConfig.NQueries)
-	queries := utils.GenerateQueries(c.api, baseLayerQueries, commitmentVerifier.PcsConfig.FriConfig.NQueries, circuitData.DedupedQueriesShape, circuitData.MaxLogSize)
-	queriesLookup := utils.ToLookupTable(c.api, queries)
+	fmt.Printf("After base layerqueries generate")
 
+	// Generate all queries for all layers
+	queries := utils.GenerateQueries(c.api, baseLayerQueries, commitmentVerifier.PcsConfig.FriConfig.NQueries, bounds)
+	fmt.Printf("After queries generate")
 	// ╔══════════════════════════════════╗
 	// ║        Trace decommitments       ║
 	// ╚══════════════════════════════════╝
 
 	// Verify merkle decommitments
 	for treeIndex, tree := range commitmentVerifier.Trees {
-		tree.Verify(queriesLookup, proof.QueriedValues[treeIndex], proof.Decommitments[treeIndex])
+		if tree == nil {
+			continue
+		}
+		// We need to pass valid query positions for this tree's log sizes
+		// In Solidity this is done by filtering query positions
+		tree.Verify(queries, proof.QueriedValues[treeIndex], proof.Decommitments[treeIndex])
 	}
 
 	// ╔══════════════════════════════════╗
@@ -141,15 +192,14 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 	maskPoints := components.ComputeGenericMaskPoints(c.api, c.uapi, c.circle, oodsPoint, params)
 
 	// Verify FRI quotients
-	friAnswers := friVerifier.FriQuotientEvaluations(proof.SampledValues, maskPoints, queries, proof.QueriedValues, randomCoeff)
+	friAnswers := friVerifier.FriQuotientEvaluations(proof.SampledValues, maskPoints, queries, proof.QueriedValues, friRandomCoeff)
 	friAnswersEncoded := fri.EncodeFriAnswers(c.qm31, friAnswers)
 	friAnswersLookup := utils.ToLookupTable(c.api, friAnswersEncoded)
-	friVerifier.Verify(queriesLookup, friAnswersLookup)
+	friVerifier.Verify(queries, friAnswersLookup)
 }
 
 // initializeCommitmentScheme initializes the commitment scheme verifier with tree information
 func (c *VerifierChip) initializeCommitmentScheme(proof variables.StarkProof, params variables.VerificationParams) *fri.CommitmentSchemeVerifier {
-	// Tree roots are already in correct format ([32]uints.U8)
 	// Create commitment scheme verifier using generic constructor
 	return fri.NewCommitmentSchemeVerifierGeneric(
 		c.api,
@@ -161,89 +211,52 @@ func (c *VerifierChip) initializeCommitmentScheme(proof variables.StarkProof, pa
 	)
 }
 
-// // VerifyLegacy is the old Cairo-specific verification function
-// // Kept for backward compatibility with existing tests
-// // DEPRECATED: Use Verify with VerificationParams instead
-// func (c *VerifierChip) VerifyLegacy(proof variables.StarkProof, pcsConfig variables.PcsConfig, circuitData variables.CircuitData, commitmentVerifier fri.CommitmentSchemeVerifier, compositionLogDegreeBound frontend.Variable, compositionPolynomial circle.SecureCirclePoly) {
+// debugPrintDigest prints a digest in hex format for debugging
+func (c *VerifierChip) debugPrintDigest(label string, digest [8]uints.U32) {
+	fmt.Printf("\n=== %s ===\n", label)
 
-// 	// Draw random coeff from channel for OODS
-// 	randomCoeff := c.channel.DrawFelt()
+	// Convert to bytes in little-endian word order
+	bytes := make([]byte, 32)
+	for i := 0; i < 8; i++ {
+		word := digest[i]
+		for j := 0; j < 4; j++ {
+			val := word[j].Val
+			var byteVal byte
+			switch v := val.(type) {
+			case int:
+				byteVal = byte(v)
+			case *big.Int:
+				byteVal = byte(v.Uint64())
+			case uint64:
+				byteVal = byte(v)
+			default:
+				byteVal = 0
+			}
+			bytes[i*4+j] = byteVal
+		}
+	}
+	fmt.Printf("Hex: 0x%s\n", hex.EncodeToString(bytes))
 
-// 	// Verify composition polynomial commitment
-// 	compositionLogSizes := []frontend.Variable{compositionLogDegreeBound, compositionLogDegreeBound, compositionLogDegreeBound, compositionLogDegreeBound}
-// 	commitmentVerifier.Commit(cairo_components.CP_IDX, proof.Commitments[cairo_components.CP_IDX], compositionLogSizes, c.channel)
-
-// 	// ╔══════════════════════════════════╗
-// 	// ║               OODS               ║
-// 	// ╚══════════════════════════════════╝
-
-// 	// Verify OODS
-// 	oodsPoint := c.circle.GetRandomPoint(c.channel)
-// 	components := components.NewComponents(c.api, c.m31, c.qm31, c.circle, cairoInteractionElements, proof.Claim, proof.InteractionClaim, oodsPoint, circuitData)
-
-// 	// Extract CP evaluation from sampled values
-// 	compositionOodsEval := c.qm31.FromPartialEvals(
-// 		proof.SampledValues[cairo_components.CP_IDX][0][0],
-// 		proof.SampledValues[cairo_components.CP_IDX][1][0],
-// 		proof.SampledValues[cairo_components.CP_IDX][2][0],
-// 		proof.SampledValues[cairo_components.CP_IDX][3][0],
-// 	)
-
-// 	// evaluate constraints using sampled values
-// 	constraintsOodsEval := compositionPolynomial.EvalAt(c.qm31, oodsPoint)
-
-// 	// verify OODS
-// 	c.qm31.AssertEqual(compositionOodsEval, constraintsOodsEval)
-
-// 	// ╔══════════════════════════════════╗
-// 	// ║          FRI Commitment          ║
-// 	// ╚══════════════════════════════════╝
-
-// 	// Mix flatten sampled values into channel
-// 	flattenedSampledValues := utils.FlattenTree(utils.FlattenTree(proof.StarkProof.SampledValues))
-// 	c.channel.MixFelts(flattenedSampledValues)
-
-// 	// Draw random coeff for FRI
-// 	randomCoeff = c.channel.DrawFelt()
-
-// 	// Compute bounds (column log sizes deduped, in decreasing order and not blew up)
-// 	bounds := commitmentVerifier.Bounds()
-
-// 	// Verification of commitment stage of FRI
-// 	friVerifier := fri.NewFriVerifier(c.api, c.uapi, c.channel, c.qm31, c.circle, commitmentVerifier.PcsConfig.FriConfig, proof.StarkProof.FriProof, bounds, circuitData)
-
-// 	// Proof of work
-// 	c.channel.MixAndCheckPowNonce(proof.StarkProof.ProofOfWork, int(commitmentVerifier.PcsConfig.PowBits))
-
-// 	// ╔══════════════════════════════════╗
-// 	// ║              Queries             ║
-// 	// ╚══════════════════════════════════╝
-
-// 	// Generate base layer queries and verify they match the hinted queries
-// 	maxLogSize := bounds[0]
-// 	baseLayerQueries := c.channel.GenerateBaseLayerQueries(maxLogSize, commitmentVerifier.PcsConfig.FriConfig.NQueries)
-// 	queries := utils.GenerateQueries(c.api, baseLayerQueries, commitmentVerifier.PcsConfig.FriConfig.NQueries, circuitData.DedupedQueriesShape, circuitData.MaxLogSize)
-// 	queriesLookup := utils.ToLookupTable(c.api, queries)
-
-// 	// ╔══════════════════════════════════╗
-// 	// ║        Trace decommitments       ║
-// 	// ╚══════════════════════════════════╝
-
-// 	// Verify merkle decommitments
-// 	for treeIndex, tree := range commitmentVerifier.Trees {
-// 		tree.Verify(queriesLookup, proof.QueriedValues[treeIndex], proof.Decommitments[treeIndex], circuitData.DedupedQueriesShape, circuitData.QueriesBranching)
-// 	}
-
-// 	// ╔══════════════════════════════════╗
-// 	// ║               FRI                ║
-// 	// ╚══════════════════════════════════╝
-
-// 	// Compute mask points
-// 	maskPoints := components.MaskPoints(c.api, proof.Claim, oodsPoint, c.circle, circuitData)
-
-// 	// Verify FRI quotients
-// 	friAnswers := friVerifier.FriQuotientEvaluations(proof.SampledValues, maskPoints, queries, proof.QueriedValues, randomCoeff)
-// 	friAnswersEncoded := fri.EncodeFriAnswers(c.qm31, friAnswers)
-// 	friAnswersLookup := utils.ToLookupTable(c.api, friAnswersEncoded)
-// 	friVerifier.Verify(queriesLookup, friAnswersLookup)
-// }
+	// Also print in big-endian
+	bytesReversed := make([]byte, 32)
+	for i := 0; i < 8; i++ {
+		word := digest[7-i]
+		for j := 0; j < 4; j++ {
+			val := word[3-j].Val
+			var byteVal byte
+			switch v := val.(type) {
+			case int:
+				byteVal = byte(v)
+			case *big.Int:
+				byteVal = byte(v.Uint64())
+			case uint64:
+				byteVal = byte(v)
+			default:
+				byteVal = 0
+			}
+			bytesReversed[i*4+j] = byteVal
+		}
+	}
+	fmt.Printf("Hex (big-endian): 0x%s\n", hex.EncodeToString(bytesReversed))
+	fmt.Println("===================")
+}

@@ -3,6 +3,7 @@ package variables
 import (
 	"github.com/HerodotusDev/stwo-gnark-verifier/circle"
 	"github.com/HerodotusDev/stwo-gnark-verifier/m31"
+	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/std/math/uints"
 )
 
@@ -14,7 +15,8 @@ import (
 type StarkProof struct {
 	Config PcsConfig
 	// Commitments are the four commmitment roots. len(Commitments) = 4.
-	Commitments [][32]uints.U8
+	// Stored as frontend.Variable for witness compatibility
+	Commitments [][32]frontend.Variable
 	// SampledValues are the sampled values for each column of each tree.
 	// len(sampledValues) = 4. len(sampledValues[tree]) = number of columns in the tree.
 	// There can be up to 2 values per column (at OODS-1 and OODS for the 4 last interaction columns of a component).
@@ -61,7 +63,65 @@ type FriLayerProof struct {
 	// Decommitment is the decommitment for the FRI layer merkle commitment.
 	Decommitment MerkleDecommitment
 	// Commitment is the commitment to the FRI layer.
-	Commitment [32]uints.U8
+	// Stored as frontend.Variable for witness compatibility
+	Commitment [32]frontend.Variable
+}
+
+// ╔══════════════════════════════════╗
+// ║             Raw Types            ║
+// ╚══════════════════════════════════╝
+
+type StarkProofRaw struct {
+	Config          PcsConfigRaw            `json:"config"`
+	Commitments     [][]uint8               `json:"commitments"`
+	SampledValues   SampledValuesRaw        `json:"sampled_values"`
+	QueriedValues   [][]uint64              `json:"queried_values"`
+	Decommitments   []MerkleDecommitmentRaw `json:"decommitments"`
+	FriProof        FriProofRaw             `json:"fri_proof"`
+	ProofOfWork     uint64                  `json:"proof_of_work"`
+	CompositionPoly *CompositionPolyRaw     `json:"composition_poly"`
+}
+
+type PcsConfigRaw struct {
+	PowBits   uint8        `json:"pow_bits"`
+	FriConfig FriConfigRaw `json:"fri_config"`
+}
+
+type FriConfigRaw struct {
+	LogBlowupFactor         uint64 `json:"log_blowup_factor"`
+	LogLastLayerDegreeBound uint8  `json:"log_last_layer_degree_bound"`
+	NQueries                uint8  `json:"n_queries"`
+}
+
+type SampledValuesRaw [][][][2][2]uint64
+
+type MerkleDecommitmentRaw struct {
+	HashWitness   [][]uint8 `json:"hash_witness"`
+	ColumnWitness []uint64  `json:"column_witness"`
+}
+
+type FriProofRaw struct {
+	FirstLayerProof  FriLayerProofRaw   `json:"first_layer_proof"`
+	InnerLayerProofs []FriLayerProofRaw `json:"inner_layer_proofs"`
+	LastLayerPoly    LinePolyRaw        `json:"last_layer_poly"`
+}
+
+type FriLayerProofRaw struct {
+	FriWitness   [][2][2]uint64        `json:"fri_witness"`
+	Decommitment MerkleDecommitmentRaw `json:"decommitment"`
+	Commitment   []uint8               `json:"commitment"`
+}
+
+type LinePolyRaw struct {
+	Coeffs  [][2][2]uint64 `json:"coeffs"`
+	LogSize uint8          `json:"log_size"`
+}
+
+type CompositionPolyRaw struct {
+	Coeffs0 []uint64 `json:"coeffs0"`
+	Coeffs1 []uint64 `json:"coeffs1"`
+	Coeffs2 []uint64 `json:"coeffs2"`
+	Coeffs3 []uint64 `json:"coeffs3"`
 }
 
 // ╔══════════════════════════════════╗
@@ -77,6 +137,7 @@ func BuildStarkProof(starkProofRaw *StarkProofRaw) StarkProof {
 	compositionPoly := buildCompositionPoly(starkProofRaw.CompositionPoly)
 
 	return StarkProof{
+		Config:          buildPcsConfig(starkProofRaw.Config),
 		Commitments:     buildCommitments(starkProofRaw.Commitments),
 		SampledValues:   buildSampledValues(starkProofRaw.SampledValues),
 		QueriedValues:   buildQueriedValues(starkProofRaw.QueriedValues),
@@ -87,19 +148,30 @@ func BuildStarkProof(starkProofRaw *StarkProofRaw) StarkProof {
 	}
 }
 
-func buildCommitments(raw [][]uint8) [][32]uints.U8 {
+func buildPcsConfig(raw PcsConfigRaw) PcsConfig {
+	return PcsConfig{
+		PowBits: raw.PowBits,
+		FriConfig: FriConfig{
+			LogBlowupFactor:         int(raw.FriConfig.LogBlowupFactor),
+			LogLastLayerDegreeBound: raw.FriConfig.LogLastLayerDegreeBound,
+			NQueries:                raw.FriConfig.NQueries,
+		},
+	}
+}
+
+func buildCommitments(raw [][]uint8) [][32]frontend.Variable {
 	if len(raw) == 0 {
 		return nil
 	}
 
-	result := make([][32]uints.U8, len(raw))
+	result := make([][32]frontend.Variable, len(raw))
 	for i, entry := range raw {
 		if len(entry) != 32 {
 			panic("commitment root must be 32 bytes")
 		}
-		var root [32]uints.U8
+		var root [32]frontend.Variable
 		for j, b := range entry {
-			root[j] = uints.NewU8(b)
+			root[j] = frontend.Variable(b)
 		}
 		result[i] = root
 	}
@@ -126,7 +198,8 @@ func buildSampledValues(raw SampledValuesRaw) [][][]m31.QM31 {
 
 			columnValues := make([]m31.QM31, 0, len(evaluations))
 			for _, entry := range evaluations {
-				columnValues = append(columnValues, m31.NewQM31FromArrays(entry))
+				// entry is [2][2]uint64
+				columnValues = append(columnValues, m31.NewQM31Unchecked(entry[0][0], entry[0][1], entry[1][0], entry[1][1]))
 			}
 			domainValues[columnIdx] = columnValues
 		}
@@ -210,7 +283,8 @@ func buildInnerLayerProofs(raw []FriLayerProofRaw) []FriLayerProof {
 func buildInnerLayerProof(raw FriLayerProofRaw) FriLayerProof {
 	friWitness := make([]m31.QM31, len(raw.FriWitness))
 	for i, entry := range raw.FriWitness {
-		friWitness[i] = m31.NewQM31FromArrays(entry)
+		// entry is [2][2]uint64
+		friWitness[i] = m31.NewQM31Unchecked(entry[0][0], entry[0][1], entry[1][0], entry[1][1])
 	}
 
 	decommitment := buildDecommitments([]MerkleDecommitmentRaw{raw.Decommitment})[0]
@@ -224,9 +298,13 @@ func buildInnerLayerProof(raw FriLayerProofRaw) FriLayerProof {
 }
 
 func buildLastLayerPoly(raw LinePolyRaw) circle.LinePoly {
-	coeffs := m31.NewQM31FromArrays(raw.Coeffs[0])
+	// Each element in raw.Coeffs is [2][2]uint64 representing one QM31 coefficient
+	coeffs := make([]m31.QM31, len(raw.Coeffs))
+	for i := 0; i < len(raw.Coeffs); i++ {
+		coeffs[i] = m31.NewQM31Unchecked(raw.Coeffs[i][0][0], raw.Coeffs[i][0][1], raw.Coeffs[i][1][0], raw.Coeffs[i][1][1])
+	}
 	return circle.LinePoly{
-		Coeffs:  []m31.QM31{coeffs},
+		Coeffs:  coeffs,
 		LogSize: uints.NewU8(raw.LogSize),
 	}
 }
