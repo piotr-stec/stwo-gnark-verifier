@@ -3,6 +3,7 @@ package utils
 // Are considered utils functions that are built directly on top of the gnark library
 
 import (
+	"fmt"
 	"math/big"
 
 	"github.com/consensys/gnark/frontend"
@@ -89,20 +90,24 @@ func VariableToInt(v frontend.Variable) int {
 // ╚══════════════════════════════════╝
 
 // GenerateQueries folds the base layer queries and deduplicates them layer by layer.
-// It returns the deduplicated queries for all layers from root to leaves (exactly maxLogSize + 1 layers).
-// bounds contains the deduplicated log sizes in descending order (maxLogSize is bounds[0])
-func GenerateQueries(api frontend.API, baseLayerQueries []frontend.Variable, nQueries uint8, bounds []int) [][]frontend.Variable {
-	if len(bounds) == 0 {
+// It returns queries only for layers that exist in columnLogSizes (unique tree sizes).
+// This matches Rust's get_query_positions_by_log_size:
+// - log_domain_size is the max column_log_size
+// - for each column_log_size, fold queries by (log_domain_size - column_log_size)
+// bounds contains the FRI degree bounds in descending order.
+// columnLogSizes contains the unique Merkle tree layer sizes in ascending order.
+func GenerateQueries(api frontend.API, baseLayerQueries []frontend.Variable, nQueries uint8, bounds []int, columnLogSizes []int) [][]frontend.Variable {
+	if len(columnLogSizes) == 0 {
 		return nil
 	}
-	maxLogSize := bounds[0]
 
-	// initialize the queries array
-	queriesDeduped := make([][]frontend.Variable, maxLogSize+1)
+	// log_domain_size is the max column_log_size (matching Rust)
+	logDomainSize := columnLogSizes[len(columnLogSizes)-1]
+
+	// initialize the queries array - sized to logDomainSize+1 for indexing by logSize
+	queriesDeduped := make([][]frontend.Variable, logDomainSize+1)
 
 	// deduplicate and order the base layer queries
-	// We use nQueries as the output size for the hint.
-	// Assumes deduplicated count <= nQueries (which is true).
 	layerQueriesDeduped, err := api.Compiler().NewHint(DeduplicationHint, int(nQueries), baseLayerQueries...)
 	if err != nil {
 		panic(err)
@@ -111,13 +116,30 @@ func GenerateQueries(api frontend.API, baseLayerQueries []frontend.Variable, nQu
 	if err != nil {
 		panic(err)
 	}
+	fmt.Printf("layerQueriesDedupedOrdered = %v\n", layerQueriesDedupedOrdered)
 	AssertPartialDeduplication(api, layerQueriesDedupedOrdered, baseLayerQueries)
 	AssertAscendingOrder(api, layerQueriesDedupedOrdered)
-	queriesDeduped[maxLogSize] = layerQueriesDedupedOrdered
 
-	// build all queries above the base layer
-	for l := maxLogSize; l >= 1; l-- {
-		queriesDeduped[l-1] = FoldQueries(api, queriesDeduped[l], int(nQueries))
+	// Base queries are at logDomainSize (max size)
+	queriesDeduped[logDomainSize] = layerQueriesDedupedOrdered
+
+	// For each column_log_size, fold queries by (log_domain_size - column_log_size)
+	// Build intermediate folded layers we'll need
+	for i := len(columnLogSizes) - 1; i >= 0; i-- {
+		columnLogSize := columnLogSizes[i]
+		nFolds := logDomainSize - columnLogSize
+
+		// Fold from logDomainSize down to columnLogSize
+		currentQueries := queriesDeduped[logDomainSize]
+		for fold := 0; fold < nFolds; fold++ {
+			targetSize := logDomainSize - fold - 1
+			if queriesDeduped[targetSize] == nil {
+				currentQueries = FoldQueries(api, currentQueries, int(nQueries))
+				queriesDeduped[targetSize] = currentQueries
+			} else {
+				currentQueries = queriesDeduped[targetSize]
+			}
+		}
 	}
 
 	return queriesDeduped

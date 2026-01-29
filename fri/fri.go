@@ -61,7 +61,7 @@ func NewFriVerifier(
 		proof:                   friProof.FirstLayerProof,
 		foldingAlpha:            channelChip.DrawFelt(),
 	}
-		channelChip.DebugPrint("After draw felt ")
+	channelChip.DebugPrint("After draw felt ")
 
 	// Inner layer verifiers
 	layerBound := frontend.Variable(bounds[0] - 2) // first bound folded and blew up
@@ -70,7 +70,7 @@ func NewFriVerifier(
 	innerLayerVerifiers := make([]FriInnerLayerVerifier, len(friProof.InnerLayerProofs))
 	for i, innerLayerProof := range friProof.InnerLayerProofs {
 		channelChip.MixRootBytesVar(innerLayerProof.Commitment[:])
-			channelChip.DebugPrint(fmt.Sprintf("After mix root inner %v", i))
+		channelChip.DebugPrint(fmt.Sprintf("After mix root inner %v", i))
 
 		innerLayerVerifiers[i] = FriInnerLayerVerifier{
 			degreeBound:  layerBound,
@@ -127,6 +127,25 @@ func (f *FriVerifier) FriQuotientEvaluations(
 	queriedValues [][]m31.M31,
 	randomCoeff m31.QM31,
 ) [][]m31.QM31 {
+	fmt.Printf("=== FRI QUOTIENT EVALUATIONS GO DEBUG ===\n")
+	fmt.Printf("Tree column log sizes = %v\n", f.treeColumnLogSizes)
+	fmt.Printf("Bounds = %v\n", f.bounds)
+	fmt.Printf("Random coeff = %v\n", randomCoeff)
+	fmt.Printf("SampledPoints trees: %d\n", len(sampledPoints))
+	for treeIdx, tree := range sampledPoints {
+		fmt.Printf("  Tree %d: %d columns\n", treeIdx, len(tree))
+		for colIdx, col := range tree {
+			fmt.Printf("    Column %d: %d points\n", colIdx, len(col))
+		}
+	}
+	fmt.Printf("SampledValues trees: %d\n", len(sampledValues))
+	for treeIdx, tree := range sampledValues {
+		fmt.Printf("  Tree %d: %d columns\n", treeIdx, len(tree))
+		for colIdx, col := range tree {
+			fmt.Printf("    Column %d: %d values, first value = %v\n", colIdx, len(col), col[0])
+		}
+	}
+
 	// Calculate maxNColumns
 	maxNColumns := 0
 	for i := 0; i < 32; i++ {
@@ -142,6 +161,7 @@ func (f *FriVerifier) FriQuotientEvaluations(
 			maxNColumns = nColumns
 		}
 	}
+	fmt.Printf("MaxNColumns = %d\n", maxNColumns)
 
 	// precompute randomCoeff powers
 	randomCoeffPowers := make([]m31.QM31, maxNColumns+1)
@@ -149,67 +169,145 @@ func (f *FriVerifier) FriQuotientEvaluations(
 	for i := 1; i < maxNColumns+1; i++ {
 		randomCoeffPowers[i] = f.qm31Chip.Mul(randomCoeffPowers[i-1], randomCoeff)
 	}
+	fmt.Printf("Random coeff powers[0] = %v\n", randomCoeffPowers[0])
+	fmt.Printf("Random coeff powers[1] = %v\n", randomCoeffPowers[1])
+	if maxNColumns >= 2 {
+		fmt.Printf("Random coeff powers[2] = %v\n", randomCoeffPowers[2])
+	}
 
 	samplesByLogSize := make([][][]SampleData, 32)
 	for i := range samplesByLogSize {
 		samplesByLogSize[i] = make([][]SampleData, 0)
 	}
 	columnIndexes := make([]int, 32)
+	fmt.Printf("\n=== GROUPING SAMPLES BY LOG SIZE ===\n")
 	for treeIndex, tree := range sampledPoints {
+		fmt.Printf("Processing tree %d with %d columns\n", treeIndex, len(tree))
 		for columnIndex, column := range tree {
-			logSize := f.treeColumnLogSizes[treeIndex][columnIndex] + 1
+			// f.treeColumnLogSizes already contains blowup sizes!
+			blowupLogSize := f.treeColumnLogSizes[treeIndex][columnIndex]
+			fmt.Printf("  Column %d: blowup_log_size=%d, %d points\n",
+				columnIndex, blowupLogSize, len(column))
 
 			for pointIndex, point := range column {
-				for range len(column) - len(samplesByLogSize[logSize]) {
-					samplesByLogSize[logSize] = append(samplesByLogSize[logSize], make([]SampleData, 0))
+				for range len(column) - len(samplesByLogSize[blowupLogSize]) {
+					samplesByLogSize[blowupLogSize] = append(samplesByLogSize[blowupLogSize], make([]SampleData, 0))
 				}
-				alpha := randomCoeffPowers[len(samplesByLogSize[logSize][len(column)-pointIndex-1])+1]
+				alphaIndex := len(samplesByLogSize[blowupLogSize][len(column)-pointIndex-1])
+				alpha := randomCoeffPowers[alphaIndex]
 				sampledValue := sampledValues[treeIndex][columnIndex][pointIndex]
 				lineCoefficients := GetLineCoefficients(f.qm31Chip, point, sampledValue, alpha)
-				samplesByLogSize[logSize][len(column)-pointIndex-1] = append(samplesByLogSize[logSize][len(column)-pointIndex-1], SampleData{
+				fmt.Printf("    Point %d: alphaIndex=%d, alpha=%v, value=%v\n",
+					pointIndex, alphaIndex, alpha, sampledValue)
+				fmt.Printf("      Line coeffs: a=%v, b=%v, c=%v\n",
+					lineCoefficients[0], lineCoefficients[1], lineCoefficients[2])
+				samplesByLogSize[blowupLogSize][len(column)-pointIndex-1] = append(samplesByLogSize[blowupLogSize][len(column)-pointIndex-1], SampleData{
 					point:            point,
-					columnIndex:      columnIndexes[logSize],
+					columnIndex:      columnIndexes[blowupLogSize],
 					value:            sampledValue,
 					lineCoefficients: lineCoefficients,
 				})
 			}
-			columnIndexes[logSize]++
+			columnIndexes[blowupLogSize]++
+		}
+	}
+
+	fmt.Printf("\n=== SAMPLES BY LOG SIZE SUMMARY ===\n")
+	for logSize, batches := range samplesByLogSize {
+		if len(batches) > 0 {
+			fmt.Printf("LogSize %d: %d batches\n", logSize, len(batches))
+			for batchIdx, batch := range batches {
+				fmt.Printf("  Batch %d: %d samples\n", batchIdx, len(batch))
+				for sampleIdx, sample := range batch {
+					fmt.Printf("    Sample %d: columnIndex=%d, value=%v\n",
+						sampleIdx, sample.columnIndex, sample.value)
+				}
+			}
 		}
 	}
 
 	quotientEvaluations := make([][]m31.QM31, 0)
 	queriedValuesPointer := make([]int, len(f.treeColumnLogSizes))
 
-	// f.bounds are BLEW UP log sizes.
-	for _, logSize := range f.bounds {
-		samples := samplesByLogSize[logSize]
+	fmt.Printf("\n=== PROCESSING QUERIES ===\n")
+	fmt.Printf("QueriedValues lengths: ")
+	for treeIdx, vals := range queriedValues {
+		fmt.Printf("tree[%d]=%d ", treeIdx, len(vals))
+	}
+	fmt.Printf("\n")
 
-		circleDomain := circle.NewCanonicCoset(f.circleChip, frontend.Variable(logSize)).CircleDomain()
+	// Get unique blowup log sizes (sorted descending)
+	// f.treeColumnLogSizes already contains blowup sizes!
+	uniqueBlowupSizes := make(map[int]struct{})
+	for _, treeSizes := range f.treeColumnLogSizes {
+		for _, blowupSize := range treeSizes { // Already blowup sizes
+			uniqueBlowupSizes[blowupSize] = struct{}{}
+		}
+	}
+
+	blowupSizes := make([]int, 0, len(uniqueBlowupSizes))
+	for size := range uniqueBlowupSizes {
+		blowupSizes = append(blowupSizes, size)
+	}
+	// Sort descending
+	for i := 0; i < len(blowupSizes); i++ {
+		for j := i + 1; j < len(blowupSizes); j++ {
+			if blowupSizes[i] < blowupSizes[j] {
+				blowupSizes[i], blowupSizes[j] = blowupSizes[j], blowupSizes[i]
+			}
+		}
+	}
+
+	fmt.Printf("Blowup sizes (sorted desc): %v\n", blowupSizes)
+
+	// Process queries for each blowup log size
+	for _, blowupLogSize := range blowupSizes {
+		samples := samplesByLogSize[blowupLogSize]
+		fmt.Printf("\n--- Processing blowupLogSize %d ---\n", blowupLogSize)
+		fmt.Printf("Number of sample batches: %d\n", len(samples))
+		fmt.Printf("Number of queries: %d\n", len(queries[blowupLogSize]))
+
+		circleDomain := circle.NewCanonicCoset(f.circleChip, frontend.Variable(blowupLogSize)).CircleDomain()
 		layerQuotientEvaluations := make([]m31.QM31, 0)
 
-		// Iterate queries for this log size
-		for _, queryPosition := range queries[logSize] {
-			bitReversedQueryPosition := reverseBitIndex(f.api, f.uapi, queryPosition, logSize)
+		// Iterate queries for this blowup log size
+		for queryIdx, queryPosition := range queries[blowupLogSize] {
+			bitReversedQueryPosition := reverseBitIndex(f.api, f.uapi, queryPosition, blowupLogSize)
 			domainPoint := circleDomain.At(bitReversedQueryPosition)
+			fmt.Printf("\nQuery %d: position=%v, bitReversed=%v, domainPoint=(%v, %v)\n",
+				queryIdx, queryPosition, bitReversedQueryPosition, domainPoint.X, domainPoint.Y)
 
 			valuesAtQueryPosition := make([]m31.M31, 0)
+			fmt.Printf("  Gathering values from trees:\n")
 			for treeIndex, treeLogSizes := range f.treeColumnLogSizes {
-				targetBaseLogSize := logSize - 1
+				// treeLogSizes already contains blowup sizes, match them directly
 				nColumns := 0
 				for _, ls := range treeLogSizes {
-					if ls == targetBaseLogSize {
+					if ls == blowupLogSize {
 						nColumns++
 					}
 				}
 
-				valuesAtQueryPosition = append(valuesAtQueryPosition, queriedValues[treeIndex][queriedValuesPointer[treeIndex]:queriedValuesPointer[treeIndex]+nColumns]...)
+				fmt.Printf("    Tree %d: blowupLogSize=%d, nColumns=%d, pointer=%d\n",
+					treeIndex, blowupLogSize, nColumns, queriedValuesPointer[treeIndex])
+
+				if nColumns > 0 {
+					extractedValues := queriedValues[treeIndex][queriedValuesPointer[treeIndex] : queriedValuesPointer[treeIndex]+nColumns]
+					fmt.Printf("      Extracted values: %v\n", extractedValues)
+					valuesAtQueryPosition = append(valuesAtQueryPosition, extractedValues...)
+				}
 				queriedValuesPointer[treeIndex] += nColumns
 			}
-			layerQuotientEvaluations = append(layerQuotientEvaluations, f.quotientEvaluation(samples, valuesAtQueryPosition, domainPoint, randomCoeffPowers))
+			fmt.Printf("  Total valuesAtQueryPosition: %d values = %v\n", len(valuesAtQueryPosition), valuesAtQueryPosition)
+
+			result := f.quotientEvaluation(samples, valuesAtQueryPosition, domainPoint, randomCoeffPowers)
+			fmt.Printf("  Result: %v\n", result)
+			layerQuotientEvaluations = append(layerQuotientEvaluations, result)
 		}
 		quotientEvaluations = append(quotientEvaluations, layerQuotientEvaluations)
 	}
 
+	fmt.Printf("\n=== FRI QUOTIENT EVALUATIONS COMPLETE ===\n")
 	return quotientEvaluations
 }
 
@@ -229,9 +327,17 @@ func GetLineCoefficients(qm31Chip *m31.QM31Chip, samplePoint circle.Point, sampl
 }
 
 func (f *FriVerifier) quotientEvaluation(samples [][]SampleData, valuesAtQueryPosition []m31.M31, domainPoint circle.BasePoint, randomCoeffPowers []m31.QM31) m31.QM31 {
+	fmt.Printf("\n  === quotientEvaluation ===\n")
+	fmt.Printf("  Number of sample batches: %d\n", len(samples))
+	fmt.Printf("  Number of values: %d\n", len(valuesAtQueryPosition))
+	fmt.Printf("  DomainPoint: (%v, %v)\n", domainPoint.X, domainPoint.Y)
+
 	quotientEvaluation := f.qm31Chip.Zero()
-	for _, samplesData := range samples {
+	for batchIdx, samplesData := range samples {
+		fmt.Printf("\n  --- Batch %d: %d samples ---\n", batchIdx, len(samplesData))
 		point := samplesData[0].point
+		fmt.Printf("  Sample point: x=%v, y=%v\n", point.X, point.Y)
+
 		samplePointRX := m31.CM31{Real: point.X.AReal, Imag: point.X.AImag}
 		samplePointRY := m31.CM31{Real: point.Y.AReal, Imag: point.Y.AImag}
 		samplePointIX := m31.CM31{Real: point.X.BReal, Imag: point.X.BImag}
@@ -252,20 +358,44 @@ func (f *FriVerifier) quotientEvaluation(samples [][]SampleData, valuesAtQueryPo
 				samplePointIX,
 			),
 		)
+		fmt.Printf("  Denominator: %v\n", denominator)
 		denominatorInverse := f.qm31Chip.CM31Inverse(denominator)
+		fmt.Printf("  Denominator inverse: %v\n", denominatorInverse)
+
 		numerator := f.qm31Chip.Zero()
-		for _, sampleData := range samplesData {
+		for sampleIdx, sampleData := range samplesData {
 			a := sampleData.lineCoefficients[0]
 			b := sampleData.lineCoefficients[1]
 			c := sampleData.lineCoefficients[2]
-			value := f.qm31Chip.MulM31(c, valuesAtQueryPosition[sampleData.columnIndex])
+			columnIdx := sampleData.columnIndex
+			fmt.Printf("    Sample %d: columnIndex=%d\n", sampleIdx, columnIdx)
+			fmt.Printf("      Line coeffs: a=%v, b=%v, c=%v\n", a, b, c)
+
+			if columnIdx >= len(valuesAtQueryPosition) {
+				fmt.Printf("      ERROR: columnIndex %d >= len(valuesAtQueryPosition) %d\n", columnIdx, len(valuesAtQueryPosition))
+				continue
+			}
+
+			queryValue := valuesAtQueryPosition[columnIdx]
+			fmt.Printf("      Query value [%d]: %v\n", columnIdx, queryValue)
+			value := f.qm31Chip.MulM31(c, queryValue)
+			fmt.Printf("      value = c * queryValue = %v\n", value)
 			linearTerm := f.qm31Chip.Add(f.qm31Chip.MulM31(a, domainPoint.Y), b)
-			numerator = f.qm31Chip.Add(numerator, f.qm31Chip.Sub(value, linearTerm))
+			fmt.Printf("      linearTerm = a*domainPoint.Y + b = %v\n", linearTerm)
+			term := f.qm31Chip.Sub(value, linearTerm)
+			fmt.Printf("      term = value - linearTerm = %v\n", term)
+			numerator = f.qm31Chip.Add(numerator, term)
+			fmt.Printf("      numerator accumulated = %v\n", numerator)
 		}
+
 		pointCoeff := randomCoeffPowers[len(samplesData)]
+		fmt.Printf("  Point coeff (alpha^%d): %v\n", len(samplesData), pointCoeff)
 		frac := f.qm31Chip.MulCM31(numerator, denominatorInverse)
+		fmt.Printf("  Fraction (numerator/denominator): %v\n", frac)
 		quotientEvaluation = f.qm31Chip.Add(f.qm31Chip.Mul(quotientEvaluation, pointCoeff), frac)
+		fmt.Printf("  Quotient evaluation accumulated: %v\n", quotientEvaluation)
 	}
+	fmt.Printf("  Final quotient evaluation result = %v\n", quotientEvaluation)
 	return quotientEvaluation
 }
 

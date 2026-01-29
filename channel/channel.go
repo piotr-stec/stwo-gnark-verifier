@@ -309,13 +309,17 @@ func (c *Channel) checkProofOfWork(nonce uints.U64, nBits int) {
 // ╚══════════════════════════════════╝
 
 // GenerateBaseLayerQueries the largest layer of queries used by the verifier (folding happens outside of this function)
+// This matches Rust's Queries::generate which uses BTreeSet for automatic deduplication and sorting
 func (c *Channel) GenerateBaseLayerQueries(maxLogSize frontend.Variable, nQueries uint8) []frontend.Variable {
+	fmt.Printf("Max log size in generate = %v, nQueries=%v", maxLogSize, nQueries)
+	
+	// Generate queries (potentially with duplicates)
 	queries := make([]frontend.Variable, 0)
 	queryCount := uint8(0)
 	maxQuery := c.api.Sub(utils.Pow(c.api, c.comparator, frontend.Variable(2), maxLogSize), frontend.Variable(1))
 	maxQueryU32 := c.uapi.ValueOf(maxQuery)
-	// TODO: this fails with probability ~1/2^32. The prover should hint how many and which queries are duplicates.
-	//       This information should be provided through circuitData.
+	
+	// Generate enough queries to handle potential duplicates
 	nDuplicates := uint8(0)
 	for queryCount < nQueries+nDuplicates {
 		randomBytes := c.DrawRandomBytes()
@@ -329,7 +333,22 @@ func (c *Channel) GenerateBaseLayerQueries(maxLogSize frontend.Variable, nQuerie
 			}
 		}
 	}
-	return queries
+	
+	// Deduplicate and sort queries (matching Rust's BTreeSet behavior)
+	queriesDeduped, err := c.api.Compiler().NewHint(utils.DeduplicationHint, int(nQueries), queries...)
+	if err != nil {
+		panic(err)
+	}
+	queriesSorted, err := c.api.Compiler().NewHint(utils.AscendingOrderHint, int(nQueries), queriesDeduped...)
+	if err != nil {
+		panic(err)
+	}
+	
+	// Verify the deduplication and sorting
+	utils.AssertPartialDeduplication(c.api, queriesSorted, queries)
+	utils.AssertAscendingOrder(c.api, queriesSorted)
+	
+	return queriesSorted
 }
 
 // ╔══════════════════════════════════╗

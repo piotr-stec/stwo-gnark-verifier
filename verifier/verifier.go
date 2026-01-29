@@ -88,6 +88,7 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 	// Commit to Composition Polynomial
 	// In Solidity: _performCompositionCommit
 	compositionLogDegreeBound := params.ComponentsCompositionLogDegreeBound
+	fmt.Printf("DEBUG Verify: compositionLogDegreeBound = %v\n", compositionLogDegreeBound)
 	compositionSizes := []int{compositionLogDegreeBound, compositionLogDegreeBound, compositionLogDegreeBound, compositionLogDegreeBound}
 	fmt.Printf("Debug commiyment verifier log sizes: %v\n", commitmentVerifier.TreeColumnLogSizes)
 	commitmentVerifier.Commit(
@@ -140,6 +141,7 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 
 	// Draw random coeff for FRI
 	friRandomCoeff := c.channel.DrawFelt()
+	fmt.Printf("Random coeff = %v", friRandomCoeff)
 
 	fmt.Printf("Debug commiyment verifier log sizes: %v\n", commitmentVerifier.TreeColumnLogSizes)
 
@@ -161,15 +163,48 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 	// ╔══════════════════════════════════╗
 	// ║              Queries             ║
 	// ╚══════════════════════════════════╝
-
 	// Generate base layer queries and verify they match the hinted queries
-	maxLogSize := bounds[0]
-	baseLayerQueries := c.channel.GenerateBaseLayerQueries(maxLogSize, commitmentVerifier.PcsConfig.FriConfig.NQueries)
+	// TreeColumnLogSizes already contains BLOWUP sizes (base + log_blowup_factor)
+	// Find max blowup size and collect unique blowup sizes
+	maxLogSize := 0
+	uniqueSizesMap := make(map[int]bool)
+	for _, treeSizes := range commitmentVerifier.TreeColumnLogSizes {
+		for _, blowupSize := range treeSizes {  // These are already blowup sizes!
+			if blowupSize > maxLogSize {
+				maxLogSize = blowupSize
+			}
+			if blowupSize > 0 {
+				uniqueSizesMap[blowupSize] = true
+			}
+		}
+	}
+
+	// Convert map to sorted slice (these are blowup sizes)
+	columnLogSizes := make([]int, 0, len(uniqueSizesMap))
+	for size := range uniqueSizesMap {
+		columnLogSizes = append(columnLogSizes, size)
+	}
+	// Sort in ascending order
+	for i := 0; i < len(columnLogSizes); i++ {
+		for j := i + 1; j < len(columnLogSizes); j++ {
+			if columnLogSizes[i] > columnLogSizes[j] {
+				columnLogSizes[i], columnLogSizes[j] = columnLogSizes[j], columnLogSizes[i]
+			}
+		}
+	}
+
+	fmt.Printf("Max log size = %v\n", maxLogSize)
+	fmt.Printf("Tree column log sizes (blowup) = %v\n", commitmentVerifier.TreeColumnLogSizes)
+	fmt.Printf("Unique column log sizes (blowup) = %v\n", columnLogSizes)
+
+	baseLayerQueries := c.channel.GenerateBaseLayerQueries(frontend.Variable(maxLogSize), commitmentVerifier.PcsConfig.FriConfig.NQueries)
+	fmt.Printf("baseLayerQueries generate = %v\n", baseLayerQueries)
+
 	fmt.Printf("After base layerqueries generate")
 
 	// Generate all queries for all layers
-	queries := utils.GenerateQueries(c.api, baseLayerQueries, commitmentVerifier.PcsConfig.FriConfig.NQueries, bounds)
-	fmt.Printf("After queries generate")
+	queries := utils.GenerateQueries(c.api, baseLayerQueries, commitmentVerifier.PcsConfig.FriConfig.NQueries, bounds, columnLogSizes)
+
 	// ╔══════════════════════════════════╗
 	// ║        Trace decommitments       ║
 	// ╚══════════════════════════════════╝
@@ -183,18 +218,34 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 		// In Solidity this is done by filtering query positions
 		tree.Verify(queries, proof.QueriedValues[treeIndex], proof.Decommitments[treeIndex])
 	}
-
+	fmt.Printf("After tree verify\n")
 	// ╔══════════════════════════════════╗
 	// ║               FRI                ║
 	// ╚══════════════════════════════════╝
-
-	// Compute mask points from generic params (analogous to Solidity's maskPoints)
 	maskPoints := components.ComputeGenericMaskPoints(c.api, c.uapi, c.circle, oodsPoint, params)
+	fmt.Printf("DEBUG Verify: maskPoints before composition = %v\n", maskPoints)
+
+	const SECURE_EXTENSION_DEGREE = 4
+	compositionMaskPoints := make([][]circle.Point, SECURE_EXTENSION_DEGREE)
+	for i := 0; i < SECURE_EXTENSION_DEGREE; i++ {
+		compositionMaskPoints[i] = []circle.Point{oodsPoint}
+	}
+	maskPoints = append(maskPoints, compositionMaskPoints)
+	fmt.Printf("DEBUG Verify: maskPoints after composition = %v\n", maskPoints)
+
+	fmt.Printf("Queries = %v\n", queries)
 
 	// Verify FRI quotients
 	friAnswers := friVerifier.FriQuotientEvaluations(proof.SampledValues, maskPoints, queries, proof.QueriedValues, friRandomCoeff)
+	fmt.Printf("After FRI Quotient Evaluations\n")
+
 	friAnswersEncoded := fri.EncodeFriAnswers(c.qm31, friAnswers)
+	fmt.Printf("Encode Fri Answers\n")
+
 	friAnswersLookup := utils.ToLookupTable(c.api, friAnswersEncoded)
+	fmt.Printf("After to Lookup table\n")
+	fmt.Printf("Fri answers = %v\n", friAnswers)
+
 	friVerifier.Verify(queries, friAnswersLookup)
 }
 
