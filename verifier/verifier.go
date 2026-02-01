@@ -169,7 +169,7 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 	maxLogSize := 0
 	uniqueSizesMap := make(map[int]bool)
 	for _, treeSizes := range commitmentVerifier.TreeColumnLogSizes {
-		for _, blowupSize := range treeSizes {  // These are already blowup sizes!
+		for _, blowupSize := range treeSizes { 
 			if blowupSize > maxLogSize {
 				maxLogSize = blowupSize
 			}
@@ -204,6 +204,7 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 
 	// Generate all queries for all layers
 	queries := utils.GenerateQueries(c.api, baseLayerQueries, commitmentVerifier.PcsConfig.FriConfig.NQueries, bounds, columnLogSizes)
+	// queriesLookup := utils.ToLookupTable(c.api, queries)
 
 	// ╔══════════════════════════════════╗
 	// ║        Trace decommitments       ║
@@ -234,7 +235,7 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 	fmt.Printf("DEBUG Verify: maskPoints after composition = %v\n", maskPoints)
 
 	fmt.Printf("Queries = %v\n", queries)
-
+	fmt.Printf("Sampled values proof = %v\n", proof.SampledValues)
 	// Verify FRI quotients
 	friAnswers := friVerifier.FriQuotientEvaluations(proof.SampledValues, maskPoints, queries, proof.QueriedValues, friRandomCoeff)
 	fmt.Printf("After FRI Quotient Evaluations\n")
