@@ -177,6 +177,10 @@ func (d LineDomain) Coset() Coset {
 	return d.coset
 }
 
+func (d LineDomain) At(i uints.U32) frontend.Variable {
+	return d.coset.IndexAt(i).Point().X
+}
+
 // Double returns the double of the line domain.
 func (d LineDomain) Double() LineDomain {
 	return NewLineDomain(d.coset.Double())

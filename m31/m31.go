@@ -86,6 +86,14 @@ func NewM31Chip(api frontend.API) *M31Chip {
 	return &M31Chip{api: api, rangeChecker: rangecheck.New(api)}
 }
 
+// ToCircuitVariable converts an M31 element with a Go literal limb to a circuit variable.
+// This is necessary when M31 values are constructed from raw uint64 values (e.g., during parsing)
+// and need to be used in circuit operations.
+func (m *M31Chip) ToCircuitVariable(x M31) M31 {
+	// Multiply by 1 to force gnark to convert the value to a circuit variable
+	return NewM31Unchecked(m.api.Mul(x.Limb, 1))
+}
+
 // ╔══════════════════════════════════╗
 // ║          M31 Arithemtics         ║
 // ╚══════════════════════════════════╝

@@ -12,6 +12,7 @@ func init() {
 	solver.RegisterHint(AscendingOrderHint)
 	solver.RegisterHint(DescendingOrderHint)
 	solver.RegisterHint(QueriesBranchingHint)
+	solver.RegisterHint(FoldQueriesHint)
 }
 
 // DeduplicationHint takes a list of big.Ints and returns its deduplicated version.
@@ -44,7 +45,7 @@ func AscendingOrderHint(_ *big.Int, inputs []*big.Int, results []*big.Int) error
 		sorted[i] = new(big.Int).Set(e)
 	}
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Cmp(sorted[j]) < 0 })
-	
+
 	for i := 0; i < len(results) && i < len(sorted); i++ {
 		results[i] = new(big.Int).Set(sorted[i])
 	}
@@ -59,7 +60,7 @@ func DescendingOrderHint(_ *big.Int, inputs []*big.Int, results []*big.Int) erro
 		sorted[i] = new(big.Int).Set(e)
 	}
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Cmp(sorted[j]) > 0 })
-	
+
 	for i := 0; i < len(results) && i < len(sorted); i++ {
 		results[i] = new(big.Int).Set(sorted[i])
 	}
@@ -76,16 +77,16 @@ func QueriesBranchingHint(_ *big.Int, inputs []*big.Int, results []*big.Int) err
 	// We assume len(results) corresponds to len(queriesLayer).
 	// So inputs[0:len(results)] is queriesLayer.
 	// inputs[len(results):] is queriesNextLayer.
-	
+
 	nQueries := len(results)
 	if len(inputs) < nQueries {
 		// Should not happen if correctly called
 		return nil
 	}
-	
+
 	queriesLayer := inputs[:nQueries]
 	queriesNextLayer := inputs[nQueries:]
-	
+
 	// Create map for next layer for O(1) lookup
 	nextLayerMap := make(map[uint64]bool)
 	for _, q := range queriesNextLayer {
@@ -93,25 +94,65 @@ func QueriesBranchingHint(_ *big.Int, inputs []*big.Int, results []*big.Int) err
 			nextLayerMap[q.Uint64()] = true
 		}
 	}
-	
+
 	for i, q := range queriesLayer {
 		if !q.IsUint64() {
 			results[i] = big.NewInt(0)
 			continue
 		}
-		
+
 		val := q.Uint64()
 		mask := 0
-		
+
 		if nextLayerMap[2*val] {
 			mask |= 1
 		}
 		if nextLayerMap[2*val+1] {
 			mask |= 2
 		}
-		
+
 		results[i] = big.NewInt(int64(mask))
 	}
-	
+
+	return nil
+}
+
+// FoldQueriesHint folds queries by right-shifting and deduplicating
+// Inputs: [nFolds, queries[...]]
+// Results: [folded_queries[...]] (padded with 1<<32 if needed)
+// Rust equivalent: queries.iter().map(|&p| p >> n_folds).dedup().collect()
+func FoldQueriesHint(_ *big.Int, inputs []*big.Int, results []*big.Int) error {
+	if len(inputs) == 0 {
+		return nil
+	}
+
+	nFolds := inputs[0].Uint64()
+	queries := inputs[1:]
+
+	// Fold each query and deduplicate
+	seen := make(map[uint64]bool)
+	folded := make([]uint64, 0)
+
+	for _, q := range queries {
+		if !q.IsUint64() {
+			continue
+		}
+		foldedVal := q.Uint64() >> nFolds
+		if !seen[foldedVal] {
+			seen[foldedVal] = true
+			folded = append(folded, foldedVal)
+		}
+	}
+
+	// Fill results
+	for i := 0; i < len(results); i++ {
+		if i < len(folded) {
+			results[i] = new(big.Int).SetUint64(folded[i])
+		} else {
+			// Pad with sentinel value
+			results[i] = new(big.Int).SetUint64(1 << 32)
+		}
+	}
+
 	return nil
 }

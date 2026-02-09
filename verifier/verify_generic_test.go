@@ -27,19 +27,26 @@ func TestVerifyGeneric(t *testing.T) {
 		t.Fatalf("Failed to load verification params: %v", err)
 	}
 
+	shapePath := "../fibonacci_shape.json"
+	shapeRaw, err := variables.ReadCircuitShape(shapePath)
+	if err != nil {
+		t.Fatalf("Failed to load circuit shape: %v", err)
+	}
 	// Build circuit-ready structures
 	starkProof := variables.BuildStarkProof(proofRaw)
 	verificationParamsCircuit := variables.BuildVerificationParams(paramsRaw)
 	verificationParamsAssignment := variables.BuildVerificationParams(paramsRaw)
-
+	circuitData := variables.BuildCircuitData(shapeRaw)
 	circuit := GenericVerifierCircuit{
 		Proof:  starkProof,
 		Params: verificationParamsCircuit,
+		Shape:  circuitData,
 	}
 
 	assignment := GenericVerifierCircuit{
 		Proof:  starkProof,
 		Params: verificationParamsAssignment,
+		Shape:  circuitData,
 	}
 
 	// Use IsSolved which just checks if constraints are satisfied without serialization
@@ -55,11 +62,12 @@ func TestVerifyGeneric(t *testing.T) {
 type GenericVerifierCircuit struct {
 	Proof  variables.StarkProof         `gnark:",public"`
 	Params variables.VerificationParams `gnark:",public"`
+	Shape variables.CircuitData         `gnark:",public"`
 }
 
 func (c *GenericVerifierCircuit) Define(api frontend.API) error {
 	verifierChip := NewVerifierChip(api)
-	verifierChip.Verify(c.Proof, c.Params)
+	verifierChip.Verify(c.Proof, c.Params, c.Shape)
 	return nil
 }
 

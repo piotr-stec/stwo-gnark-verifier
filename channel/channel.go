@@ -142,27 +142,6 @@ func (c *Channel) MixRootBytes(root []uints.U8) {
 	c.updateDigest(c.computeDigest(msg))
 }
 
-// MixRootBytesVar mixes root bytes from frontend.Variable slice into the digest
-func (c *Channel) MixRootBytesVar(rootVar []frontend.Variable) {
-	// DEBUG: Check incoming values
-	fmt.Printf("DEBUG MixRootBytesVar: len(rootVar)=%d, rootVar[0]=%v, rootVar[1]=%v\n", len(rootVar), rootVar[0], rootVar[1])
-
-	// Convert frontend.Variable to uints.U8
-	bapi, err := uints.NewBytes(c.api)
-	if err != nil {
-		panic(err)
-	}
-	root := make([]uints.U8, len(rootVar))
-	for i, v := range rootVar {
-		root[i] = bapi.ValueOf(v)
-	}
-
-	// DEBUG: Check converted values
-	fmt.Printf("DEBUG MixRootBytesVar after convert: root[0]=%v, root[1]=%v\n", root[0], root[1])
-
-	c.MixRootBytes(root)
-}
-
 // MixFelts absorbs secure field elements into the digest.
 func (c *Channel) MixFelts(felts []m31.QM31) {
 	msg := c.hashToBytes(c.digest)
@@ -227,6 +206,7 @@ func (c *Channel) DrawRandomBytes() []uints.U8 {
 	return bytes
 }
 
+
 // ╔══════════════════════════════════╗
 // ║        Proof of Work Checks      ║
 // ╚══════════════════════════════════╝
@@ -234,7 +214,17 @@ func (c *Channel) DrawRandomBytes() []uints.U8 {
 // MixAndCheckPowNonce mixes a nonce and checks the leading zero bits.
 func (c *Channel) MixAndCheckPowNonce(nonce uints.U64, interactionPowBits int) {
 	c.MixU64(nonce)
-	c.checkProofOfWork(nonce, interactionPowBits)
+	checkProofOfWork(c.uapi, c.digest, interactionPowBits)
+}
+
+// checkProofOfWork verifies that the digest has the required leading zeros.
+// Is is assumed that InteractionPowBits is a constant less than 32.
+// Runs a 32-InteractionPowBits RC in big endian order.
+func checkProofOfWork(uapi *uints.BinaryField[uints.U32], digest Blake2sHash, interactionPowBits int) {
+	lsw := digest[0]
+	mask := uints.NewU32((1 << interactionPowBits) - 1)
+	masked := uapi.And(lsw, mask)
+	uapi.AssertEq(masked, uints.NewU32(0))
 }
 
 // CheckPowNonce verifies the proof of work without mixing the nonce.
@@ -242,67 +232,67 @@ func (c *Channel) MixAndCheckPowNonce(nonce uints.U64, interactionPowBits int) {
 // 1. Computes H1 = Hash(POW_PREFIX || [0; 24] || digest || n_bits)
 // 2. Computes H2 = Hash(H1 || nonce)
 // 3. Checks that H2 has at least n_bits trailing zeros
-func (c *Channel) CheckPowNonce(nonce uints.U64, interactionPowBits int) {
-	c.checkProofOfWork(nonce, interactionPowBits)
-}
+// func (c *Channel) CheckPowNonce(nonce uints.U64, interactionPowBits int) {
+// 	c.checkProofOfWork(nonce, interactionPowBits)
+// }
 
-// checkProofOfWork implements the proof of work verification matching Rust's verify_pow_nonce.
-// Verifies that H(H(POW_PREFIX, [0_u8; 24], digest, n_bits), nonce) has at least n_bits trailing zeros.
-func (c *Channel) checkProofOfWork(nonce uints.U64, nBits int) {
-	const POW_PREFIX uint32 = 0x12345678
+// // checkProofOfWork implements the proof of work verification matching Rust's verify_pow_nonce.
+// // Verifies that H(H(POW_PREFIX, [0_u8; 24], digest, n_bits), nonce) has at least n_bits trailing zeros.
+// func (c *Channel) checkProofOfWork(nonce uints.U64, nBits int) {
+// 	const POW_PREFIX uint32 = 0x12345678
 
-	// Step 1: Compute H(POW_PREFIX, [0; 24], digest, n_bits)
-	msg1 := make([]uints.U8, 0, 4+24+32+4)
+// 	// Step 1: Compute H(POW_PREFIX, [0; 24], digest, n_bits)
+// 	msg1 := make([]uints.U8, 0, 4+24+32+4)
 
-	// Add POW_PREFIX (4 bytes, little-endian)
-	powPrefixU32 := uints.NewU32(POW_PREFIX)
-	msg1 = append(msg1, c.uapi.UnpackLSB(powPrefixU32)...)
+// 	// Add POW_PREFIX (4 bytes, little-endian)
+// 	powPrefixU32 := uints.NewU32(POW_PREFIX)
+// 	msg1 = append(msg1, c.uapi.UnpackLSB(powPrefixU32)...)
 
-	// Add 24 zero bytes
-	for i := 0; i < 24; i++ {
-		msg1 = append(msg1, uints.NewU8(0))
-	}
+// 	// Add 24 zero bytes
+// 	for i := 0; i < 24; i++ {
+// 		msg1 = append(msg1, uints.NewU8(0))
+// 	}
 
-	// Add current digest (32 bytes)
-	msg1 = append(msg1, c.hashToBytes(c.digest)...)
+// 	// Add current digest (32 bytes)
+// 	msg1 = append(msg1, c.hashToBytes(c.digest)...)
 
-	// Add n_bits (4 bytes, little-endian u32)
-	nBitsU32 := uints.NewU32(uint32(nBits))
-	msg1 = append(msg1, c.uapi.UnpackLSB(nBitsU32)...)
+// 	// Add n_bits (4 bytes, little-endian u32)
+// 	nBitsU32 := uints.NewU32(uint32(nBits))
+// 	msg1 = append(msg1, c.uapi.UnpackLSB(nBitsU32)...)
 
-	prefixedDigest := c.computeDigest(msg1)
+// 	prefixedDigest := c.computeDigest(msg1)
 
-	// Step 2: Compute H(prefixed_digest, nonce)
-	msg2 := c.hashToBytes(prefixedDigest)
-	// nonce is U64 = [8]U8, append all 8 bytes
-	for i := 0; i < 8; i++ {
-		msg2 = append(msg2, nonce[i])
-	}
+// 	// Step 2: Compute H(prefixed_digest, nonce)
+// 	msg2 := c.hashToBytes(prefixedDigest)
+// 	// nonce is U64 = [8]U8, append all 8 bytes
+// 	for i := 0; i < 8; i++ {
+// 		msg2 = append(msg2, nonce[i])
+// 	}
 
-	result := c.computeDigest(msg2)
+// 	result := c.computeDigest(msg2)
 
-	// Step 3: Check trailing zeros
-	// The result is 32 bytes = 256 bits
-	// We need to check if the first n_bits are zero (in little-endian byte order)
-	// This means checking trailing zeros when interpreted as u128/u256 little-endian
+// 	// Step 3: Check trailing zeros
+// 	// The result is 32 bytes = 256 bits
+// 	// We need to check if the first n_bits are zero (in little-endian byte order)
+// 	// This means checking trailing zeros when interpreted as u128/u256 little-endian
 
-	// For simplicity, check the required number of bits in the first words
-	bitsToCheck := nBits
-	for i := 0; i < 8 && bitsToCheck > 0; i++ {
-		word := result[i]
-		if bitsToCheck >= 32 {
-			// Entire word must be zero
-			c.uapi.AssertEq(word, uints.NewU32(0))
-			bitsToCheck -= 32
-		} else {
-			// Only some bits of this word must be zero
-			mask := uints.NewU32((1 << bitsToCheck) - 1)
-			masked := c.uapi.And(word, mask)
-			c.uapi.AssertEq(masked, uints.NewU32(0))
-			bitsToCheck = 0
-		}
-	}
-}
+// 	// For simplicity, check the required number of bits in the first words
+// 	bitsToCheck := nBits
+// 	for i := 0; i < 8 && bitsToCheck > 0; i++ {
+// 		word := result[i]
+// 		if bitsToCheck >= 32 {
+// 			// Entire word must be zero
+// 			c.uapi.AssertEq(word, uints.NewU32(0))
+// 			bitsToCheck -= 32
+// 		} else {
+// 			// Only some bits of this word must be zero
+// 			mask := uints.NewU32((1 << bitsToCheck) - 1)
+// 			masked := c.uapi.And(word, mask)
+// 			c.uapi.AssertEq(masked, uints.NewU32(0))
+// 			bitsToCheck = 0
+// 		}
+// 	}
+// }
 
 // ╔══════════════════════════════════╗
 // ║              Queries             ║
@@ -351,6 +341,29 @@ func (c *Channel) GenerateBaseLayerQueries(maxLogSize frontend.Variable, nQuerie
 	return queriesSorted
 }
 
+func (c *Channel) GenerateBaseLayerQueries2(maxLogSize frontend.Variable, nQueries uint8) []frontend.Variable {
+	queries := make([]frontend.Variable, 0)
+	queryCount := uint8(0)
+	maxQuery := c.api.Sub(utils.Pow(c.api, c.comparator, frontend.Variable(2), maxLogSize), frontend.Variable(1))
+	maxQueryU32 := c.uapi.ValueOf(maxQuery)
+	// TODO: this fails with probability ~1/2^32. The prover should hint how many and which queries are duplicates.
+	//       This information should be provided through circuitData.
+	nDuplicates := uint8(0)
+	for queryCount < nQueries+nDuplicates {
+		randomBytes := c.DrawRandomBytes()
+		for i := 0; i < len(randomBytes); i += 4 {
+			query := c.uapi.PackLSB(randomBytes[i], randomBytes[i+1], randomBytes[i+2], randomBytes[i+3])
+			quotientQuery := c.uapi.And(query, maxQueryU32)
+			queries = append(queries, c.uapi.ToValue(quotientQuery))
+			queryCount++
+			if queryCount == nQueries+nDuplicates {
+				break
+			}
+		}
+	}
+	return queries
+}
+
 // ╔══════════════════════════════════╗
 // ║           Helper Methods         ║
 // ╚══════════════════════════════════╝
@@ -377,7 +390,10 @@ func (c *Channel) drawRandomWords() Blake2sHash {
 	msg := c.hashToBytes(c.digest)
 	msg = append(msg, c.uapi.UnpackLSB(c.channelTime.nSent)...)
 
-	msg = append(msg, uints.NewU8(0))
+	zeroWord := uints.NewU32(0)
+	for i := 0; i < 7; i++ {
+		msg = append(msg, c.uapi.UnpackLSB(zeroWord)...)
+	}
 
 	c.channelTime.incSent(c.uapi)
 

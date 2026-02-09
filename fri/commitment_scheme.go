@@ -1,11 +1,12 @@
 package fri
 
 import (
-	"fmt"
 	"sort"
 
 	"github.com/HerodotusDev/stwo-gnark-verifier/channel"
 	"github.com/HerodotusDev/stwo-gnark-verifier/variables"
+		"github.com/HerodotusDev/stwo-gnark-verifier/utils"
+
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/std/math/uints"
 )
@@ -16,7 +17,7 @@ type CommitmentSchemeVerifier struct {
 	uapi               *uints.BinaryField[uints.U32]
 	PcsConfig          variables.PcsConfig
 	Trees              []*MerkleVerifier
-	TreeColumnLogSizes [][]int // Blew up log sizes if needed? No, these are base log sizes
+	TreeColumnLogSizes [][]int 
 }
 
 // NewCommitmentSchemeVerifierGeneric initializes the commitment scheme verifier with generic parameters
@@ -26,7 +27,7 @@ func NewCommitmentSchemeVerifierGeneric(
 	uapi *uints.BinaryField[uints.U32],
 	channel *channel.Channel,
 	pcsConfig variables.PcsConfig,
-	treeRoots [][32]frontend.Variable,
+	treeRoots [][32]uints.U8,
 	treeColumnLogSizes [][]int,
 ) *CommitmentSchemeVerifier {
 	numTrees := len(treeRoots)
@@ -48,15 +49,10 @@ func NewCommitmentSchemeVerifierGeneric(
 	return verifier
 }
 
-func (v *CommitmentSchemeVerifier) initializeTree(treeIndex int, rootRaw [32]frontend.Variable, logSizes []int, ch *channel.Channel) {
-	// DEBUG: Check incoming root values
-	fmt.Printf("DEBUG initializeTree START: treeIndex=%d, rootRaw[0]=%v, rootRaw[1]=%v\n", treeIndex, rootRaw[0], rootRaw[1])
-
-	// Compute blew up log sizes
-	logBlowupFactor := v.PcsConfig.FriConfig.LogBlowupFactor
+func (v *CommitmentSchemeVerifier) initializeTree(treeIndex int, rootRaw [32]uints.U8, logSizes []int, ch *channel.Channel) {
 	columnLogSizes := make([]frontend.Variable, len(logSizes))
 	for i, logSize := range logSizes {
-		columnLogSizes[i] = frontend.Variable(logSize + logBlowupFactor)
+		columnLogSizes[i] = frontend.Variable(logSize)
 	}
 
 	// Compute nDomainPerLogSize for this tree
@@ -66,23 +62,19 @@ func (v *CommitmentSchemeVerifier) initializeTree(treeIndex int, rootRaw [32]fro
 			maxLogSize = ls
 		}
 	}
-	// Blowup
-	maxLogSize += logBlowupFactor
 
 	nDomainPerLogSize := make([]int, maxLogSize+1)
 	for _, ls := range logSizes {
-		blownUpLs := ls + logBlowupFactor
-		if blownUpLs < len(nDomainPerLogSize) {
-			nDomainPerLogSize[blownUpLs]++
+		if ls < len(nDomainPerLogSize) {
+			nDomainPerLogSize[ls]++
 		}
 	}
 
-	fmt.Printf("DEBUG initializeTree END: creating MerkleVerifier\n")
 	v.Trees[treeIndex] = NewMerkleVerifier(v.api, v.uapi, rootRaw, columnLogSizes, nDomainPerLogSize)
 }
 
 // Commit mixes the Merkle root into the channel and stores the verifier for the tree.
-func (v *CommitmentSchemeVerifier) Commit(treeIndex int, rootRaw [32]frontend.Variable, logSizes []int, ch *channel.Channel) {
+func (v *CommitmentSchemeVerifier) Commit(treeIndex int, rootRaw [32]uints.U8, logSizes []int, ch *channel.Channel) {
 	if treeIndex < 0 || treeIndex >= len(v.Trees) {
 		panic("invalid tree index")
 	}
@@ -90,17 +82,9 @@ func (v *CommitmentSchemeVerifier) Commit(treeIndex int, rootRaw [32]frontend.Va
 		panic("channel must not be nil")
 	}
 	// Mix root into channel (convert to uints.U8 first)
-	ch.MixRootBytesVar(rootRaw[:])
+	ch.MixRootBytes(rootRaw[:])
 
-	// Compute extended log sizes (with blowup) like Rust:
-	// extended_log_sizes = log_sizes.map(|&log_size| log_size + log_blowup_factor)
-	logBlowupFactor := v.PcsConfig.FriConfig.LogBlowupFactor
-	extendedLogSizes := make([]int, len(logSizes))
-	for i, logSize := range logSizes {
-		extendedLogSizes[i] = logSize + logBlowupFactor
-	}
-
-	// Update log sizes (store extended/blew up sizes)
+	// Update TreeColumnLogSizes with commitment domain log sizes (as provided)
 	// If TreeColumnLogSizes is too short, extend it
 	if treeIndex >= len(v.TreeColumnLogSizes) {
 		// Extend to fit
@@ -108,7 +92,7 @@ func (v *CommitmentSchemeVerifier) Commit(treeIndex int, rootRaw [32]frontend.Va
 		copy(newLogSizes, v.TreeColumnLogSizes)
 		v.TreeColumnLogSizes = newLogSizes
 	}
-	v.TreeColumnLogSizes[treeIndex] = extendedLogSizes
+	v.TreeColumnLogSizes[treeIndex] = logSizes
 
 	v.initializeTree(treeIndex, rootRaw, logSizes, ch)
 }
@@ -122,18 +106,19 @@ func (v *CommitmentSchemeVerifier) Bounds() []int {
 	logBlowupFactor := v.PcsConfig.FriConfig.LogBlowupFactor
 
 	// Flatten column log sizes from all trees
-	// TreeColumnLogSizes now stores blew up sizes (after Commit fix)
-	uniqueBlownUpSizes := make(map[int]struct{})
+	// TreeColumnLogSizes stores commitment domain log sizes (base sizes, not blew up)
+	uniqueCommitmentSizes := make(map[int]struct{})
 	for _, treeSizes := range v.TreeColumnLogSizes {
-		for _, blownUpSize := range treeSizes {
-			uniqueBlownUpSizes[blownUpSize] = struct{}{}
+		for _, commitmentSize := range treeSizes {
+			uniqueCommitmentSizes[commitmentSize] = struct{}{}
 		}
 	}
 
-	// Convert to slice and subtract blowup factor to get degree bounds
-	bounds := make([]int, 0, len(uniqueBlownUpSizes))
-	for blownUpSize := range uniqueBlownUpSizes {
-		degreeBound := blownUpSize - logBlowupFactor
+	// Convert to slice (these are already commitment sizes = degree bound + blowup factor)
+	// So degree bound = commitment size - blowup factor
+	bounds := make([]int, 0, len(uniqueCommitmentSizes))
+	for commitmentSize := range uniqueCommitmentSizes {
+		degreeBound := commitmentSize - logBlowupFactor
 		bounds = append(bounds, degreeBound)
 	}
 
@@ -141,4 +126,38 @@ func (v *CommitmentSchemeVerifier) Bounds() []int {
 	sort.Sort(sort.Reverse(sort.IntSlice(bounds)))
 
 	return bounds
+}
+
+// ColumnLogSizes returns the column log sizes for the given tree (and optionally blew up)
+func (v *CommitmentSchemeVerifier) ColumnLogSizes(blowup bool) [][]frontend.Variable {
+	columnLogSizes := make([][]frontend.Variable, 4)
+	for treeIndex, merkleVerifier := range v.Trees {
+		if blowup {
+			blewupColumnLogSizes := make([]frontend.Variable, len(merkleVerifier.ColumnLogSizes))
+			for i, logSize := range merkleVerifier.ColumnLogSizes {
+				blewupColumnLogSizes[i] = v.api.Add(logSize, v.PcsConfig.FriConfig.LogBlowupFactor)
+			}
+			columnLogSizes[treeIndex] = blewupColumnLogSizes
+		} else {
+			columnLogSizes[treeIndex] = merkleVerifier.ColumnLogSizes
+		}
+	}
+	return columnLogSizes
+}
+
+// Bounds returns the deduplicated and ordered column bounds
+func (v *CommitmentSchemeVerifier) Bounds2(shape variables.CircuitData) []frontend.Variable {
+	columnLogSizes := v.ColumnLogSizes(false)
+	columnLogSizesFlattened := utils.FlattenTree(columnLogSizes)
+	dedupedLogSizes, err := v.api.Compiler().NewHint(utils.DeduplicationHint, shape.BoundsLength, columnLogSizesFlattened...)
+	if err != nil {
+		panic(err)
+	}
+	dedupedOrderedLogSizes, err := v.api.Compiler().NewHint(utils.DescendingOrderHint, shape.BoundsLength, dedupedLogSizes...)
+	if err != nil {
+		panic(err)
+	}
+	utils.AssertDescendingOrder(v.api, dedupedOrderedLogSizes)
+	utils.AssertPartialDeduplication(v.api, dedupedOrderedLogSizes, columnLogSizesFlattened)
+	return dedupedOrderedLogSizes
 }

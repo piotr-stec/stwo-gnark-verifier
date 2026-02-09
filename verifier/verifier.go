@@ -8,6 +8,7 @@ import (
 	"github.com/HerodotusDev/stwo-gnark-verifier/blake2s"
 	"github.com/HerodotusDev/stwo-gnark-verifier/channel"
 	"github.com/HerodotusDev/stwo-gnark-verifier/circle"
+
 	"github.com/HerodotusDev/stwo-gnark-verifier/components"
 	"github.com/HerodotusDev/stwo-gnark-verifier/fri"
 	"github.com/HerodotusDev/stwo-gnark-verifier/m31"
@@ -60,18 +61,18 @@ func NewVerifierChip(api frontend.API) *VerifierChip {
 // This is the main entry point for verifying proofs, analogous to Solidity's verify function
 //   - proof is the STARK proof to verify (includes composition polynomial)
 //   - params contains verification parameters (components, tree info, digest, etc.)
-func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.VerificationParams) {
+func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.VerificationParams, shape variables.CircuitData) {
 	// DEBUG: Check if TreeRoots are available
-	fmt.Printf("DEBUG Verify: len(params.TreeRoots) = %d\n", len(params.TreeRoots))
-	if len(params.TreeRoots) > 0 {
-		fmt.Printf("DEBUG Verify: params.TreeRoots[0][0] = %v\n", params.TreeRoots[0][0])
-	}
-	fmt.Printf("DEBUG Verify: params.Digest[0] = %v\n", params.Digest[0])
+	// fmt.Printf("DEBUG Verify: len(params.TreeRoots) = %d\n", len(params.TreeRoots))
+	// if len(params.TreeRoots) > 0 {
+	// 	fmt.Printf("DEBUG Verify: params.TreeRoots[0][0] = %v\n", params.TreeRoots[0][0])
+	// }
+	// fmt.Printf("DEBUG Verify: params.Digest[0] = %v\n", params.Digest[0])
 
-	// Initialize channel with digest and nDraws (like Solidity's initializeWith)
+	// // Initialize channel with digest and nDraws (like Solidity's initializeWith)
 	c.channel.InitializeWith(params.Digest, params.NDraws)
 
-	c.channel.DebugPrint("After initialization")
+	// c.channel.DebugPrint("After initialization")
 
 	// Initialize commitment scheme verifier with tree information
 	// This already mixes all commitments (including composition poly) into the channel
@@ -87,22 +88,26 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 
 	// Commit to Composition Polynomial
 	// In Solidity: _performCompositionCommit
+	// compositionLogDegreeBound is the degree bound, we need commitment domain log size
 	compositionLogDegreeBound := params.ComponentsCompositionLogDegreeBound
-	fmt.Printf("DEBUG Verify: compositionLogDegreeBound = %v\n", compositionLogDegreeBound)
-	compositionSizes := []int{compositionLogDegreeBound, compositionLogDegreeBound, compositionLogDegreeBound, compositionLogDegreeBound}
-	fmt.Printf("Debug commiyment verifier log sizes: %v\n", commitmentVerifier.TreeColumnLogSizes)
+	logBlowupFactor := commitmentVerifier.PcsConfig.FriConfig.LogBlowupFactor
+	compositionCommitmentLogSize := compositionLogDegreeBound + logBlowupFactor
+	fmt.Printf("DEBUG Verify: compositionLogDegreeBound = %v, commitmentLogSize = %v\n", compositionLogDegreeBound, compositionCommitmentLogSize)
+	compositionSizes := []int{compositionCommitmentLogSize, compositionCommitmentLogSize, compositionCommitmentLogSize, compositionCommitmentLogSize}
+	fmt.Printf("Debug commitment verifier log sizes: %v\n", commitmentVerifier.TreeColumnLogSizes)
 	commitmentVerifier.Commit(
 		cpTreeIdx,
 		proof.Commitments[cpTreeIdx],
 		compositionSizes,
 		c.channel,
 	)
-	fmt.Printf("Debug commiyment verifier log sizes: %v\n", commitmentVerifier.TreeColumnLogSizes)
+	
+	fmt.Printf("Debug commitment verifier log sizes: %v\n", commitmentVerifier.TreeColumnLogSizes)
 
-	// Debug print compostion sizes
-	fmt.Printf("DEBUG Verify: compositionSizes = %v\n", proof.Commitments[cpTreeIdx])
-	// DEBUG: Print channel state after composition commit
-	c.channel.DebugPrint("After composition commit")
+	// // Debug print compostion sizes
+	// fmt.Printf("DEBUG Verify: compositionSizes = %v\n", proof.Commitments[cpTreeIdx])
+	// // DEBUG: Print channel state after composition commit
+	// c.channel.DebugPrint("After composition commit")
 
 	// ╔══════════════════════════════════╗
 	// ║               OODS               ║
@@ -143,68 +148,42 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 	friRandomCoeff := c.channel.DrawFelt()
 	fmt.Printf("Random coeff = %v", friRandomCoeff)
 
-	fmt.Printf("Debug commiyment verifier log sizes: %v\n", commitmentVerifier.TreeColumnLogSizes)
+	// fmt.Printf("Debug commiyment verifier log sizes: %v\n", commitmentVerifier.TreeColumnLogSizes)
 
-	// Compute bounds (column log sizes deduped, in decreasing order and not blew up)
-	bounds := commitmentVerifier.Bounds()
+	// // Compute bounds (column log sizes deduped, in decreasing order and not blew up)
+	bounds := commitmentVerifier.Bounds2(shape)
 	fmt.Printf("bounds = %v\n", bounds)
 	c.channel.DebugPrint("Before New Fri verifier")
 
 	// Verification of commitment stage of FRI
-	friVerifier := fri.NewFriVerifier(c.api, c.uapi, c.channel, c.qm31, c.circle, commitmentVerifier.PcsConfig.FriConfig, proof.FriProof, bounds, commitmentVerifier.TreeColumnLogSizes)
+	friVerifier := fri.NewFriVerifier(c.api, c.uapi, c.channel, c.qm31, c.circle, commitmentVerifier.PcsConfig.FriConfig, proof.FriProof, bounds, shape)
 	c.channel.DebugPrint("After New Fri verifier")
 	fmt.Printf("DEBUG Verify: Before CheckPowNonce\n")
 
 	// Proof of work
-	c.channel.CheckPowNonce(proof.ProofOfWork, int(commitmentVerifier.PcsConfig.PowBits))
-	c.channel.MixU64(proof.ProofOfWork)
-	c.channel.DebugPrint("After mix proof of work")
+	c.channel.MixAndCheckPowNonce(proof.ProofOfWork, int(commitmentVerifier.PcsConfig.PowBits))
+	c.channel.DebugPrint("After mix and check proof of work")
+	// Proof of work
+	// c.channel.CheckPowNonce(proof.ProofOfWork, int(commitmentVerifier.PcsConfig.PowBits))
+	// c.channel.MixU64(proof.ProofOfWork)
+	// c.channel.DebugPrint("After mix proof of work")
 
 	// ╔══════════════════════════════════╗
 	// ║              Queries             ║
 	// ╚══════════════════════════════════╝
-	// Generate base layer queries and verify they match the hinted queries
-	// TreeColumnLogSizes already contains BLOWUP sizes (base + log_blowup_factor)
-	// Find max blowup size and collect unique blowup sizes
-	maxLogSize := 0
-	uniqueSizesMap := make(map[int]bool)
-	for _, treeSizes := range commitmentVerifier.TreeColumnLogSizes {
-		for _, blowupSize := range treeSizes { 
-			if blowupSize > maxLogSize {
-				maxLogSize = blowupSize
-			}
-			if blowupSize > 0 {
-				uniqueSizesMap[blowupSize] = true
-			}
-		}
-	}
+	maxLogSize := bounds[0]
 
-	// Convert map to sorted slice (these are blowup sizes)
-	columnLogSizes := make([]int, 0, len(uniqueSizesMap))
-	for size := range uniqueSizesMap {
-		columnLogSizes = append(columnLogSizes, size)
-	}
-	// Sort in ascending order
-	for i := 0; i < len(columnLogSizes); i++ {
-		for j := i + 1; j < len(columnLogSizes); j++ {
-			if columnLogSizes[i] > columnLogSizes[j] {
-				columnLogSizes[i], columnLogSizes[j] = columnLogSizes[j], columnLogSizes[i]
-			}
-		}
-	}
-
-	fmt.Printf("Max log size = %v\n", maxLogSize)
-	fmt.Printf("Tree column log sizes (blowup) = %v\n", commitmentVerifier.TreeColumnLogSizes)
-	fmt.Printf("Unique column log sizes (blowup) = %v\n", columnLogSizes)
-
-	baseLayerQueries := c.channel.GenerateBaseLayerQueries(frontend.Variable(maxLogSize), commitmentVerifier.PcsConfig.FriConfig.NQueries)
+	baseLayerQueries := c.channel.GenerateBaseLayerQueries2(maxLogSize, commitmentVerifier.PcsConfig.FriConfig.NQueries)
 	fmt.Printf("baseLayerQueries generate = %v\n", baseLayerQueries)
 
-	fmt.Printf("After base layerqueries generate")
+	// fmt.Printf("After base layerqueries generate")
+	fmt.Printf("Max log size shape: %v", shape.MaxLogSize)
 
 	// Generate all queries for all layers
-	queries := utils.GenerateQueries(c.api, baseLayerQueries, commitmentVerifier.PcsConfig.FriConfig.NQueries, bounds, columnLogSizes)
-	// queriesLookup := utils.ToLookupTable(c.api, queries)
+	queries2 := utils.GenerateQueries2(c.api, baseLayerQueries, commitmentVerifier.PcsConfig.FriConfig.NQueries, shape.DedupedQueriesShape, shape.MaxLogSize)
+
+	queriesLookup := utils.ToLookupTable(c.api, queries2)
+		fmt.Printf("Genereted queries: %v\n", queries2)
 
 	// ╔══════════════════════════════════╗
 	// ║        Trace decommitments       ║
@@ -215,16 +194,19 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 		if tree == nil {
 			continue
 		}
+		fmt.Printf("Tree column log sizes: %v\n", tree.ColumnLogSizes)
 		// We need to pass valid query positions for this tree's log sizes
-		// In Solidity this is done by filtering query positions
-		tree.Verify(queries, proof.QueriedValues[treeIndex], proof.Decommitments[treeIndex])
+		// if( len(tree.ColumnLogSizes) != len(shape.DedupedQueriesShape) ){ 
+		// 	panic("Mismatch in column log sizes and deduped query shape lengths")
+		// }
+		tree.Verify2(queriesLookup, proof.QueriedValues[treeIndex], proof.Decommitments[treeIndex], shape.DedupedQueriesShape, shape.QueriesBranching)
 	}
-	fmt.Printf("After tree verify\n")
-	// ╔══════════════════════════════════╗
-	// ║               FRI                ║
-	// ╚══════════════════════════════════╝
+	// fmt.Printf("After tree verify\n")
+	// // ╔══════════════════════════════════╗
+	// // ║               FRI                ║
+	// // ╚══════════════════════════════════╝
 	maskPoints := components.ComputeGenericMaskPoints(c.api, c.uapi, c.circle, oodsPoint, params)
-	fmt.Printf("DEBUG Verify: maskPoints before composition = %v\n", maskPoints)
+	// fmt.Printf("DEBUG Verify: maskPoints before composition = %v\n", maskPoints)
 
 	const SECURE_EXTENSION_DEGREE = 4
 	compositionMaskPoints := make([][]circle.Point, SECURE_EXTENSION_DEGREE)
@@ -234,20 +216,19 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 	maskPoints = append(maskPoints, compositionMaskPoints)
 	fmt.Printf("DEBUG Verify: maskPoints after composition = %v\n", maskPoints)
 
-	fmt.Printf("Queries = %v\n", queries)
-	fmt.Printf("Sampled values proof = %v\n", proof.SampledValues)
-	// Verify FRI quotients
-	friAnswers := friVerifier.FriQuotientEvaluations(proof.SampledValues, maskPoints, queries, proof.QueriedValues, friRandomCoeff)
+	// fmt.Printf("Queries = %v\n", queries)
+	// fmt.Printf("Sampled values proof = %v\n", proof.SampledValues)
+	// // Verify FRI quotients
+	friAnswers := friVerifier.FriQuotientEvaluations2(proof.SampledValues, maskPoints, queries2, proof.QueriedValues, friRandomCoeff, shape)
 	fmt.Printf("After FRI Quotient Evaluations\n")
-
-	friAnswersEncoded := fri.EncodeFriAnswers(c.qm31, friAnswers)
-	fmt.Printf("Encode Fri Answers\n")
-
-	friAnswersLookup := utils.ToLookupTable(c.api, friAnswersEncoded)
-	fmt.Printf("After to Lookup table\n")
 	fmt.Printf("Fri answers = %v\n", friAnswers)
 
-	friVerifier.Verify(queries, friAnswersLookup)
+	friAnswersEncoded := fri.EncodeFriAnswers(c.qm31, friAnswers)
+
+	friAnswersLookup := utils.ToLookupTable(c.api, friAnswersEncoded)
+	fmt.Printf("After to Lookup table=%v\n",friAnswersLookup)
+
+	friVerifier.Verify2(queriesLookup, friAnswersLookup, shape)
 }
 
 // initializeCommitmentScheme initializes the commitment scheme verifier with tree information

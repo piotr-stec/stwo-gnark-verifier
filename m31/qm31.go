@@ -67,6 +67,18 @@ func (q *QM31Chip) One() QM31 {
 	}
 }
 
+// ToCircuitVariable converts a QM31 element with Go literal limbs to circuit variables.
+// This is necessary when QM31 values are constructed from raw uint64 values (e.g., during parsing)
+// and need to be used in circuit operations.
+func (q *QM31Chip) ToCircuitVariable(x QM31) QM31 {
+	return QM31{
+		AReal: q.m31.ToCircuitVariable(x.AReal),
+		AImag: q.m31.ToCircuitVariable(x.AImag),
+		BReal: q.m31.ToCircuitVariable(x.BReal),
+		BImag: q.m31.ToCircuitVariable(x.BImag),
+	}
+}
+
 // NegOne returns the negative multiplicative identity.
 func (q *QM31Chip) NegOne() QM31 {
 	return QM31{

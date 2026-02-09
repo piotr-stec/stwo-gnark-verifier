@@ -20,12 +20,14 @@ type GenericVerifierCircuit struct {
 	Proof variables.StarkProof `gnark:",public"`
 	// VerificationParams from params.json (part of public witness)
 	Params variables.VerificationParams `gnark:",public"`
+	// CircuitData from _shape.json (part of public witness)
+	Shape variables.CircuitData `gnark:",public"`
 }
 
 // Define defines the circuit for generic verification
 func (c *GenericVerifierCircuit) Define(api frontend.API) error {
 	verifierChip := verifier.NewVerifierChip(api)
-	verifierChip.Verify(c.Proof, c.Params)
+	verifierChip.Verify(c.Proof, c.Params, c.Shape)
 	return nil
 }
 
@@ -33,6 +35,7 @@ func main() {
 	// Parse command line flags
 	proofPath := flag.String("proof", "proof.json", "Path to proof JSON file")
 	paramsPath := flag.String("params", "params.json", "Path to params JSON file")
+	shapePath := flag.String("shape", "", "Path to shape JSON file (optional, uses default fixture if not provided)")
 	flag.Parse()
 
 	fmt.Println("╔════════════════════════════════════════════════════╗")
@@ -66,6 +69,19 @@ func main() {
 	fmt.Printf("  - Composition log degree bound: %d\n", paramsRaw.ComponentsCompositionLogDegreeBound)
 
 	// ╔══════════════════════════════════╗
+	// ║      Load Circuit Shape          ║
+	// ╚══════════════════════════════════╝
+	var shapeRaw *variables.CircuitShapeRaw
+
+	fmt.Printf("Loading circuit shape from: %s\n", *shapePath)
+	shapeRaw, err = variables.ReadCircuitShape(*shapePath)
+	if err != nil {
+		fmt.Printf("Error loading shape: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("✓ Circuit shape loaded successfully")
+
+	// ╔══════════════════════════════════╗
 	// ║      Build Circuit Structures    ║
 	// ╚══════════════════════════════════╝
 	fmt.Println("\nBuilding circuit structures...")
@@ -76,16 +92,20 @@ func main() {
 	// Build proof for witness (separate instance)
 	witnessProof := buildStarkProofFromRaw(proofRaw)
 
-	// Build verification params
-	verificationParams := variables.BuildVerificationParams(paramsRaw)
+	// Build verification params (two separate instances - one for circuit, one for witness)
+	circuitParams := variables.BuildVerificationParams(paramsRaw)
+	witnessParams := variables.BuildVerificationParams(paramsRaw)
+	circuitData := variables.BuildCircuitData(shapeRaw)
 
 	circuit := GenericVerifierCircuit{
 		Proof:  circuitProof,
-		Params: verificationParams,
+		Params: circuitParams,
+		Shape:  circuitData,
 	}
 	assignment := GenericVerifierCircuit{
 		Proof:  witnessProof,
-		Params: verificationParams,
+		Params: witnessParams,
+		Shape:  circuitData,
 	}
 	fmt.Println("✓ Circuit structures built")
 

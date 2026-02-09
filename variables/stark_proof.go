@@ -3,7 +3,6 @@ package variables
 import (
 	"github.com/HerodotusDev/stwo-gnark-verifier/circle"
 	"github.com/HerodotusDev/stwo-gnark-verifier/m31"
-	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/std/math/uints"
 )
 
@@ -16,7 +15,7 @@ type StarkProof struct {
 	Config PcsConfig
 	// Commitments are the four commmitment roots. len(Commitments) = 4.
 	// Stored as frontend.Variable for witness compatibility
-	Commitments [][32]frontend.Variable
+	Commitments [][32]uints.U8
 	// SampledValues are the sampled values for each column of each tree.
 	// len(sampledValues) = 4. len(sampledValues[tree]) = number of columns in the tree.
 	// There can be up to 2 values per column (at OODS-1 and OODS for the 4 last interaction columns of a component).
@@ -64,7 +63,7 @@ type FriLayerProof struct {
 	Decommitment MerkleDecommitment
 	// Commitment is the commitment to the FRI layer.
 	// Stored as frontend.Variable for witness compatibility
-	Commitment [32]frontend.Variable
+	Commitment [32]uints.U8
 }
 
 // ╔══════════════════════════════════╗
@@ -159,26 +158,25 @@ func buildPcsConfig(raw PcsConfigRaw) PcsConfig {
 	}
 }
 
-func buildCommitments(raw [][]uint8) [][32]frontend.Variable {
+func buildCommitments(raw [][]uint8) [][32]uints.U8 {
 	if len(raw) == 0 {
 		return nil
 	}
 
-	result := make([][32]frontend.Variable, len(raw))
+	result := make([][32]uints.U8, len(raw))
 	for i, entry := range raw {
 		if len(entry) != 32 {
 			panic("commitment root must be 32 bytes")
 		}
-		var root [32]frontend.Variable
+		var root [32]uints.U8
 		for j, b := range entry {
-			root[j] = frontend.Variable(b)
+			root[j] = uints.NewU8(b)
 		}
 		result[i] = root
 	}
 
 	return result
 }
-
 func buildSampledValues(raw SampledValuesRaw) [][][]m31.QM31 {
 	if len(raw) == 0 {
 		return nil
