@@ -126,4 +126,6 @@ This implementation is currently under active development.
 ## Run main command
 ```bash
 go run main.go --proof <proof_JSON> --params <params_JSON> --shape <shape_JSON>
+go run main.go --proof example_data/proof_stwo.json --params example_data/params_stwo.json --shape example_data/fibonacci_shape.json
+
 ```
