@@ -35,27 +35,14 @@ type FriVerifier struct {
 	bounds             []int
 }
 
-// NewFriVerifier initializes a new FriVerifier
-func NewFriVerifier(
-	api frontend.API,
-	uapi *uints.BinaryField[uints.U32],
-	channelChip *channel.Channel,
-	qm31Chip *m31.QM31Chip,
-	circleChip *circle.CircleChip,
-	friConfig variables.FriConfig,
-	friProof variables.FriProof,
-	bounds []int,
-	treeColumnLogSizes [][]int,
-) *FriVerifier {
+func NewFriVerifier(api frontend.API, uapi *uints.BinaryField[uints.U32], channelChip *channel.Channel, qm31Chip *m31.QM31Chip, circleChip *circle.CircleChip, friConfig variables.FriConfig, friProof variables.FriProof, bounds []frontend.Variable, circuitData variables.CircuitData) *FriVerifier {
 	// First layer commitment
-	channelChip.MixRootBytesVar(friProof.FirstLayerProof.Commitment[:])
-	channelChip.DebugPrint("After mix root ")
+	channelChip.MixRootBytes(friProof.FirstLayerProof.Commitment[:])
+
 	// First layer verifier
-	// bounds are degree bounds (log_degree_bound), commitment domains need log_degree_bound + log_blowup_factor
 	columncommitmentDomains := make([]circle.CircleDomain, 0)
 	for _, bound := range bounds {
-		commitmentLogSize := api.Add(frontend.Variable(bound), friConfig.LogBlowupFactor)
-		columncommitmentDomains = append(columncommitmentDomains, circle.NewCanonicCoset(circleChip, commitmentLogSize).CircleDomain())
+		columncommitmentDomains = append(columncommitmentDomains, circle.NewCanonicCoset(circleChip, bound).CircleDomain())
 	}
 	firstLayerVerifier := FriFirstLayerVerifier{
 		columnBounds:            bounds,
@@ -63,17 +50,14 @@ func NewFriVerifier(
 		proof:                   friProof.FirstLayerProof,
 		foldingAlpha:            channelChip.DrawFelt(),
 	}
-	channelChip.DebugPrint("After draw felt ")
 
 	// Inner layer verifiers
-	layerBound := frontend.Variable(bounds[0] - 2) // first bound folded and blew up
+	layerBound := api.Sub(bounds[0], 2) // first bound folded and blew up
 	layerDomain := circle.NewLineDomain(circle.NewCoset(circleChip, circle.SubgroupGenerator(circleChip, api.Add(api.Add(layerBound, friConfig.LogBlowupFactor), 2)), api.Add(layerBound, friConfig.LogBlowupFactor)))
 
 	innerLayerVerifiers := make([]FriInnerLayerVerifier, len(friProof.InnerLayerProofs))
 	for i, innerLayerProof := range friProof.InnerLayerProofs {
-		channelChip.MixRootBytesVar(innerLayerProof.Commitment[:])
-		channelChip.DebugPrint(fmt.Sprintf("After mix root inner %v", i))
-
+		channelChip.MixRootBytes(innerLayerProof.Commitment[:])
 		innerLayerVerifiers[i] = FriInnerLayerVerifier{
 			degreeBound:  layerBound,
 			domain:       layerDomain,
@@ -86,13 +70,9 @@ func NewFriVerifier(
 		layerBound = api.Sub(layerBound, 1)
 		layerDomain = layerDomain.Double()
 	}
-	fmt.Printf("Last later coeffs %v\n", friProof.LastLayerPoly.Coeffs)
+
 	// Mix in the last layer
 	channelChip.MixFelts(friProof.LastLayerPoly.Coeffs)
-	channelChip.DebugPrint("After mix last layer coeffs ")
-	// Create last layer domain
-	lastLayerDomainLogSize := api.Add(friConfig.LogLastLayerDegreeBound, friConfig.LogBlowupFactor)
-	lastLayerDomain := circle.NewLineDomain(circle.NewCoset(circleChip, circle.SubgroupGenerator(circleChip, api.Add(lastLayerDomainLogSize, 2)), lastLayerDomainLogSize))
 
 	return &FriVerifier{
 		api:                 api,
@@ -104,23 +84,143 @@ func NewFriVerifier(
 		FirstLayerVerifier:  firstLayerVerifier,
 		InnerLayerVerifiers: innerLayerVerifiers,
 		LastLayerPoly:       friProof.LastLayerPoly,
-		lastLayerDomain:     lastLayerDomain,
-		treeColumnLogSizes:  treeColumnLogSizes,
-		bounds:              bounds,
+		lastLayerDomain:     layerDomain,
 	}
+}
+
+// FriQuotientEvaluations evaluates the FRI quotients returning quotient evaluations for each log size and for each query
+//   - columnLogSizes: log sizes of each column (blew up) for each tree
+//   - sampledValues: sampled values for each column for each tree
+//   - sampledPoints: sampled points (or "mask points") for each tree, the shape should exactly match the shape of sampledValues
+//   - queries: query positions per log size
+//   - queriedValues: column values queried for each tree ordered by log size then by query position (same as merkle decommitments)
+//   - randomCoeff: random coefficient used to batch lines with the same sample point and quotients with the same log size
+func (f *FriVerifier) FriQuotientEvaluations2(
+	sampledValues [][][]m31.QM31,
+	sampledPoints components.TreeMaskPoints,
+	queries [][]frontend.Variable,
+	queriedValues [][]m31.M31,
+	randomCoeff m31.QM31,
+	circuitData variables.CircuitData,
+) [][]m31.QM31 {
+	// compute the orvall maximum number of columns for a log size
+	maxNColumns := 0
+	for i := 0; i < 32; i++ {
+		nColumns := 0
+		for treeIndex := range len(circuitData.ColumnLogSizes) {
+			nColumns += circuitData.NColumnsPerLogSize[treeIndex][i]
+		}
+		if nColumns > maxNColumns {
+			maxNColumns = nColumns
+		}
+	}
+	fmt.Printf("xd1\n")
+	// precompute randomCoeff powers
+	randomCoeffPowers := make([]m31.QM31, maxNColumns+1)
+	randomCoeffPowers[0] = f.qm31Chip.One()
+	for i := 1; i < maxNColumns+1; i++ {
+		randomCoeffPowers[i] = f.qm31Chip.Mul(randomCoeffPowers[i-1], randomCoeff)
+	}
+	fmt.Printf("xd2\n")
+
+	// Merge sampled values and sampled points into samples (table of SampleData)
+	// This is not a map because order matters when iterating
+	// dim-1 (log size): samplesByLogSize groups all columns from all trees per log size
+	// dim-2 (point): samplesByLogSize groups sampled values of columns of same log size by sample point
+	// dim-3 (samples)
+	samplesByLogSize := make([][][]SampleData, 32)
+	for i := range samplesByLogSize {
+		samplesByLogSize[i] = make([][]SampleData, 0)
+	}
+	fmt.Printf("xd3\n")
+
+	columnIndexes := make([]int, 32)
+	for treeIndex, tree := range sampledPoints {
+		for columnIndex, column := range tree {
+			logSize := circuitData.ColumnLogSizes[treeIndex][columnIndex] + 1
+			for pointIndex, point := range column {
+				for range len(column) - len(samplesByLogSize[logSize]) {
+					samplesByLogSize[logSize] = append(samplesByLogSize[logSize], make([]SampleData, 0))
+				}
+				// when 2 points are sampled the order is [pointNegOne, point], this contrasts with the single-sampled points order ([point])
+				// using a map would require some encoding/decoding of the points which are just handles and not usable as keys
+				alpha := randomCoeffPowers[len(samplesByLogSize[logSize][len(column)-pointIndex-1])+1]
+				sampledValue := sampledValues[treeIndex][columnIndex][pointIndex]
+				lineCoefficients := GetLineCoefficients(f.qm31Chip, point, sampledValue, alpha)
+				samplesByLogSize[logSize][len(column)-pointIndex-1] = append(samplesByLogSize[logSize][len(column)-pointIndex-1], SampleData{
+					point:            point,
+					columnIndex:      columnIndexes[logSize],
+					value:            sampledValue,
+					lineCoefficients: lineCoefficients,
+				})
+			}
+			columnIndexes[logSize]++
+		}
+	}
+	fmt.Printf("xd4\n")
+
+	// evaluate the quotient at each query position for each log size
+	quotientEvaluations := make([][]m31.QM31, 0)
+	queriedValuesPointer := make([]int, len(circuitData.ColumnLogSizes))
+	for _, logSize := range circuitData.ColumnBounds {
+		fmt.Printf("xd41\n")
+		fmt.Printf("logSize = %d\n", logSize)
+
+		samples := samplesByLogSize[logSize]
+		circleDomain := circle.NewCanonicCoset(f.circleChip, frontend.Variable(logSize)).CircleDomain()
+		layerQuotientEvaluations := make([]m31.QM31, 0)
+		for _, queryPosition := range queries[logSize] {
+			fmt.Printf("xd42\n")
+			fmt.Printf("logSize = %d, queryPosition = %v\n", logSize, queryPosition)
+			bitReversedQueryPosition := reverseBitIndex(f.api, f.uapi, queryPosition, logSize)
+			domainPoint := circleDomain.At(bitReversedQueryPosition)
+			// get flattened (over trees) queried values at query position
+			valuesAtQueryPosition := make([]m31.M31, 0)
+			for treeIndex := range len(circuitData.ColumnLogSizes) {
+				fmt.Printf("xd43\n")
+				nColumns := circuitData.NColumnsPerLogSize[treeIndex][logSize-1]
+				fmt.Printf("N columns = %v\n", nColumns)
+
+				valuesAtQueryPosition = append(valuesAtQueryPosition, queriedValues[treeIndex][queriedValuesPointer[treeIndex]:queriedValuesPointer[treeIndex]+nColumns]...)
+				queriedValuesPointer[treeIndex] += nColumns
+			}
+			// evaluate the quotient at the query position for the given log size
+			layerQuotientEvaluations = append(layerQuotientEvaluations, f.quotientEvaluation(samples, valuesAtQueryPosition, domainPoint, randomCoeffPowers))
+		}
+		quotientEvaluations = append(quotientEvaluations, layerQuotientEvaluations)
+	}
+	fmt.Printf("xd5\n")
+
+	return quotientEvaluations
 }
 
 // Verify verifies the FRI proof for the given queries and evaluations
 func (f *FriVerifier) Verify(queries [][]frontend.Variable, evaluations []logderivlookup.Table) {
 	firstLayerEvaluations := f.verifyFirstLayer(queries, evaluations)
-	fmt.Printf("firstLayerEvaluations = %v\n", firstLayerEvaluations)
 
-	// TODO: Implement inner layers verification
-	// lastEvaluations := f.verifyInnerLayers(queries, firstLayerEvaluations)
+	// Print firstLayerEvaluations in readable format
+	fmt.Printf("firstLayerEvaluations (%d columns):\n", len(firstLayerEvaluations))
+	for colIdx, col := range firstLayerEvaluations {
+		fmt.Printf("  Column %d: %d evaluations\n", colIdx, len(col.evals))
+		for evalIdx, eval := range col.evals {
+			fmt.Printf("    [%d] queryInitial=%v, evals=[", evalIdx, col.queryInitials[evalIdx])
+			for pairIdx, qm31Val := range eval {
+				components := qm31Val.Components()
+				fmt.Printf("{%v %v %v %v}", components[0], components[1], components[2], components[3])
+				if pairIdx < len(eval)-1 {
+					fmt.Printf(", ")
+				}
+			}
+			fmt.Printf("]\n")
+		}
+	}
+	fmt.Printf("Queries:%d\n", queries)
+	// Verify inner layers
+	lastEvaluations := f.verifyInnerLayers(queries, firstLayerEvaluations)
+	fmt.Printf("lastEvaluations from inner layers: %v evaluations\n", lastEvaluations)
 
-	// TODO: Implement last layer verification
-	// lastLayerQueries := f.getLastLayerQueries(queries[1])
-	// f.verifyLastLayer(lastEvaluations, lastLayerQueries)
+	lastLayerQueries := f.getLastLayerQueries(queries[1])
+	f.verifyLastLayer(lastEvaluations, lastLayerQueries)
 
 }
 
@@ -132,7 +232,6 @@ func (f *FriVerifier) FriQuotientEvaluations(
 	queriedValues [][]m31.M31,
 	randomCoeff m31.QM31,
 ) [][]m31.QM31 {
-	// Calculate maxNColumns
 	maxNColumns := 0
 	for i := 0; i < 32; i++ {
 		nColumns := 0
@@ -167,69 +266,69 @@ func (f *FriVerifier) FriQuotientEvaluations(
 	columnIndexes := make([]int, 32)
 	for treeIndex, tree := range sampledPoints {
 		for columnIndex, column := range tree {
-			blowupLogSize := f.treeColumnLogSizes[treeIndex][columnIndex]
+			commitmentLogSize := f.treeColumnLogSizes[treeIndex][columnIndex]
 			for pointIndex, point := range column {
-				for range len(column) - len(samplesByLogSize[blowupLogSize]) {
-					samplesByLogSize[blowupLogSize] = append(samplesByLogSize[blowupLogSize], make([]SampleData, 0))
+				for range len(column) - len(samplesByLogSize[commitmentLogSize]) {
+					samplesByLogSize[commitmentLogSize] = append(samplesByLogSize[commitmentLogSize], make([]SampleData, 0))
 				}
-				alphaIndex := len(samplesByLogSize[blowupLogSize][len(column)-pointIndex-1])
+				alphaIndex := len(samplesByLogSize[commitmentLogSize][len(column)-pointIndex-1])
 				alpha := randomCoeffPowers[alphaIndex]
 				sampledValue := sampledValues[treeIndex][columnIndex][pointIndex]
 				lineCoefficients := GetLineCoefficients(f.qm31Chip, point, sampledValue, alpha)
-				samplesByLogSize[blowupLogSize][len(column)-pointIndex-1] = append(samplesByLogSize[blowupLogSize][len(column)-pointIndex-1], SampleData{
+				samplesByLogSize[commitmentLogSize][len(column)-pointIndex-1] = append(samplesByLogSize[commitmentLogSize][len(column)-pointIndex-1], SampleData{
 					point:            point,
-					columnIndex:      columnIndexes[blowupLogSize],
+					columnIndex:      columnIndexes[commitmentLogSize],
 					value:            sampledValue,
 					lineCoefficients: lineCoefficients,
 				})
 			}
-			columnIndexes[blowupLogSize]++
+			columnIndexes[commitmentLogSize]++
 		}
 	}
 
 	quotientEvaluations := make([][]m31.QM31, 0)
 	queriedValuesPointer := make([]int, len(f.treeColumnLogSizes))
 
-	// Get unique blowup log sizes (sorted descending)
-	// f.treeColumnLogSizes already contains blowup sizes!
-	uniqueBlowupSizes := make(map[int]struct{})
+	// Get unique commitment log sizes (sorted descending)
+	// f.treeColumnLogSizes contains commitment domain log sizes
+	uniqueCommitmentSizes := make(map[int]struct{})
 	for _, treeSizes := range f.treeColumnLogSizes {
-		for _, blowupSize := range treeSizes { // Already blowup sizes
-			uniqueBlowupSizes[blowupSize] = struct{}{}
+		for _, commitmentSize := range treeSizes {
+			uniqueCommitmentSizes[commitmentSize] = struct{}{}
 		}
 	}
 
-	blowupSizes := make([]int, 0, len(uniqueBlowupSizes))
-	for size := range uniqueBlowupSizes {
-		blowupSizes = append(blowupSizes, size)
+	commitmentSizes := make([]int, 0, len(uniqueCommitmentSizes))
+	for size := range uniqueCommitmentSizes {
+		commitmentSizes = append(commitmentSizes, size)
 	}
 	// Sort descending
-	for i := 0; i < len(blowupSizes); i++ {
-		for j := i + 1; j < len(blowupSizes); j++ {
-			if blowupSizes[i] < blowupSizes[j] {
-				blowupSizes[i], blowupSizes[j] = blowupSizes[j], blowupSizes[i]
+	for i := 0; i < len(commitmentSizes); i++ {
+		for j := i + 1; j < len(commitmentSizes); j++ {
+			if commitmentSizes[i] < commitmentSizes[j] {
+				commitmentSizes[i], commitmentSizes[j] = commitmentSizes[j], commitmentSizes[i]
 			}
 		}
 	}
 
-	// Process queries for each blowup log size
-	for _, blowupLogSize := range blowupSizes {
-		samples := samplesByLogSize[blowupLogSize]
+	// Process queries for each commitment log size
+	for _, commitmentLogSize := range commitmentSizes {
+		samples := samplesByLogSize[commitmentLogSize]
 
-		circleDomain := circle.NewCanonicCoset(f.circleChip, frontend.Variable(blowupLogSize)).CircleDomain()
+		circleDomain := circle.NewCanonicCoset(f.circleChip, frontend.Variable(commitmentLogSize)).CircleDomain()
 		layerQuotientEvaluations := make([]m31.QM31, 0)
 
-		// Iterate queries for this blowup log size
-		for _, queryPosition := range queries[blowupLogSize] {
-			bitReversedQueryPosition := reverseBitIndex(f.api, f.uapi, queryPosition, blowupLogSize)
+		// Iterate queries for this commitment log size
+		for _, queryPosition := range queries[commitmentLogSize] {
+			bitReversedQueryPosition := reverseBitIndex(f.api, f.uapi, queryPosition, commitmentLogSize)
 			domainPoint := circleDomain.At(bitReversedQueryPosition)
 
 			valuesAtQueryPosition := make([]m31.M31, 0)
 			for treeIndex, treeLogSizes := range f.treeColumnLogSizes {
-				// treeLogSizes already contains blowup sizes, match them directly
+				// treeLogSizes contains commitment domain log sizes, match them directly
 				nColumns := 0
 				for _, ls := range treeLogSizes {
-					if ls == blowupLogSize {
+					if ls == commitmentLogSize {
 						nColumns++
 					}
 				}
@@ -318,7 +417,7 @@ func (f *FriVerifier) quotientEvaluation(samples [][]SampleData, valuesAtQueryPo
 
 // First Layer
 type FriFirstLayerVerifier struct {
-	columnBounds            []int
+	columnBounds            []frontend.Variable
 	columnCommitmentDomains []circle.CircleDomain
 	proof                   variables.FriLayerProof
 	foldingAlpha            m31.QM31
@@ -335,31 +434,36 @@ func (f *FriVerifier) verifyFirstLayer(queries [][]frontend.Variable, evaluation
 	previousFriWitnessIndex := frontend.Variable(0)
 
 	columnBoundsIndex := 0
-	maxLogSize := f.bounds[0]
+	logBlowup := f.friConfig.LogBlowupFactor
 
-	// build merkle tree decommitment positions
-	for logSize := maxLogSize; logSize >= 0; logSize-- {
-		if columnBoundsIndex < len(f.bounds) && logSize == f.bounds[columnBoundsIndex] {
-			var layerSparseEvaluationsFlattened []m31.M31
-			var sparseEvaluation SparseEvaluations
-			var friWitnessIndex frontend.Variable
+	// Iterate over columns in descending order by commitment domain size
+	// bounds are degree bounds; commitment_log_size = bound + log_blowup_factor
+	for columnBoundsIndex < len(f.bounds) {
+		bound := f.bounds[columnBoundsIndex]
+		commitmentLogSize := bound + logBlowup
 
-			// Removed unused layerDecommitmentPositions return
-			layerSparseEvaluationsFlattened, sparseEvaluation, friWitnessIndex = f.RebuildEvals(
-				evaluations[columnBoundsIndex],
-				f.FirstLayerVerifier.proof.FriWitness,
-				previousFriWitnessIndex,
-				queries[logSize],
-				queries[logSize-1],
-				logSize,
-			)
-			previousFriWitnessIndex = friWitnessIndex
+		fmt.Printf("DEBUG verifyFirstLayer: columnIdx=%d, bound=%d, commitmentLogSize=%d\n",
+			columnBoundsIndex, bound, commitmentLogSize)
 
-			sparseEvaluations = append(sparseEvaluations, sparseEvaluation)
-			sparseEvaluationsFlattened = append(sparseEvaluationsFlattened, layerSparseEvaluationsFlattened...)
+		var layerSparseEvaluationsFlattened []m31.M31
+		var sparseEvaluation SparseEvaluations
+		var friWitnessIndex frontend.Variable
 
-			columnBoundsIndex++
-		}
+		// And queriesParent is at folded domain (size 2^(commitmentLogSize-1))
+		layerSparseEvaluationsFlattened, sparseEvaluation, friWitnessIndex = f.RebuildEvals(
+			evaluations[columnBoundsIndex],
+			f.FirstLayerVerifier.proof.FriWitness,
+			previousFriWitnessIndex,
+			queries[commitmentLogSize],   // queries on commitment domain
+			queries[commitmentLogSize-1], // queries on parent (folded/smaller) domain
+			commitmentLogSize,
+		)
+		previousFriWitnessIndex = friWitnessIndex
+
+		sparseEvaluations = append(sparseEvaluations, sparseEvaluation)
+		sparseEvaluationsFlattened = append(sparseEvaluationsFlattened, layerSparseEvaluationsFlattened...)
+
+		columnBoundsIndex++
 	}
 
 	columnLogSizes := make([]frontend.Variable, 0)
@@ -371,8 +475,9 @@ func (f *FriVerifier) verifyFirstLayer(queries [][]frontend.Variable, evaluation
 	}
 
 	nColumnsPerLogSize := make([]int, 32)
-	for _, logSize := range f.bounds {
-		nColumnsPerLogSize[logSize] = 4
+	for i := range f.bounds {
+		commitmentLogSize := f.bounds[i] + logBlowup
+		nColumnsPerLogSize[commitmentLogSize] = 4
 	}
 
 	// Verify Merkle decommitment
@@ -464,6 +569,7 @@ func (f *FriVerifier) verifyInnerLayers(queries [][]frontend.Variable, firstLaye
 			queries[logSize],
 			logSize+1,
 		)
+		fmt.Printf("DEBUG: RebuildEvals done for logSize=%d, sparseEvaluation evals = %v\n", logSize, sparseEvaluation.evals)
 
 		nColumnsPerLogSize := make([]int, 32)
 		nColumnsPerLogSize[logSize+1] = 4
@@ -530,6 +636,15 @@ func (f *FriVerifier) RebuildEvals(
 	queryInitials := make([]uints.U32, 0)
 	witnessIndex := previousFriWitnessIndex
 
+	// Handle empty queries case
+	if len(queriesLayer) == 0 {
+		fmt.Printf("DEBUG RebuildEvals: No queriesLayer, returning empty\n")
+		return pairedEvalsFlattened, SparseEvaluations{
+			queryInitials: queryInitials,
+			evals:         pairedEvals,
+		}, witnessIndex
+	}
+
 	nParents := len(queriesParent)
 	var branching []frontend.Variable
 	if nParents > 0 {
@@ -539,6 +654,10 @@ func (f *FriVerifier) RebuildEvals(
 		if err != nil {
 			panic(err)
 		}
+	} else {
+		// No parent queries - this happens for smaller commitment domains
+		// In this case, we process all queries directly without branching
+		fmt.Printf("DEBUG RebuildEvals: No parent queries, processing all layer queries directly\n")
 	}
 
 	childIdx := frontend.Variable(0)
@@ -556,53 +675,94 @@ func (f *FriVerifier) RebuildEvals(
 	}
 	witnessTable.Insert(frontend.Variable(0))
 
-	for i, parentQ := range queriesParent {
-		isDummy := f.api.IsZero(f.api.Sub(parentQ, 1<<32))
-		branchCode := branching[i]
+	// Handle two cases: with parent queries (using branching) or without
+	if nParents > 0 {
+		// Normal case: process using parent queries and branching hint
+		for i, parentQ := range queriesParent {
+			isDummy := f.api.IsZero(f.api.Sub(parentQ, 1<<32))
+			branchCode := branching[i]
 
-		bits := f.api.ToBinary(branchCode, 2)
-		leftPresent := bits[0]
-		rightPresent := bits[1]
+			bits := f.api.ToBinary(branchCode, 2)
+			leftPresent := bits[0]
+			rightPresent := bits[1]
 
-		leftPresent = f.api.Select(isDummy, 0, leftPresent)
-		rightPresent = f.api.Select(isDummy, 0, rightPresent)
+			leftPresent = f.api.Select(isDummy, 0, leftPresent)
+			rightPresent = f.api.Select(isDummy, 0, rightPresent)
 
-		parentQBinary := f.api.ToBinary(parentQ, 32)
-		leftChild := f.api.FromBinary(append([]frontend.Variable{0}, parentQBinary...)...)
-		rightChild := f.api.Add(leftChild, 1)
+			parentQBinary := f.api.ToBinary(parentQ, 32)
+			leftChild := f.api.FromBinary(append([]frontend.Variable{0}, parentQBinary...)...)
+			rightChild := f.api.Add(leftChild, 1)
 
-		qLeft := queriesLayerTable.Lookup(childIdx)[0]
-		f.api.AssertIsEqual(f.api.Select(leftPresent, qLeft, leftChild), leftChild)
+			qLeft := queriesLayerTable.Lookup(childIdx)[0]
+			f.api.AssertIsEqual(f.api.Select(leftPresent, qLeft, leftChild), leftChild)
 
-		idxRight := f.api.Add(childIdx, leftPresent)
-		qRight := queriesLayerTable.Lookup(idxRight)[0]
-		f.api.AssertIsEqual(f.api.Select(rightPresent, qRight, rightChild), rightChild)
+			idxRight := f.api.Add(childIdx, leftPresent)
+			qRight := queriesLayerTable.Lookup(idxRight)[0]
+			f.api.AssertIsEqual(f.api.Select(rightPresent, qRight, rightChild), rightChild)
 
-		eLeftCalc := evalAtQueries.Lookup(childIdx)[0]
-		w0 := witnessTable.Lookup(witnessIndex)[0]
-		eLeftEncoded := f.api.Select(leftPresent, eLeftCalc, w0)
+			eLeftCalc := evalAtQueries.Lookup(childIdx)[0]
+			w0 := witnessTable.Lookup(witnessIndex)[0]
+			eLeftEncoded := f.api.Select(leftPresent, eLeftCalc, w0)
 
-		witnessOffset := f.api.Sub(1, leftPresent)
-		idxWRight := f.api.Add(witnessIndex, witnessOffset)
-		wRight := witnessTable.Lookup(idxWRight)[0]
-		eRightCalc := evalAtQueries.Lookup(idxRight)[0]
-		eRightEncoded := f.api.Select(rightPresent, eRightCalc, wRight)
+			witnessOffset := f.api.Sub(1, leftPresent)
+			idxWRight := f.api.Add(witnessIndex, witnessOffset)
+			wRight := witnessTable.Lookup(idxWRight)[0]
+			eRightCalc := evalAtQueries.Lookup(idxRight)[0]
+			eRightEncoded := f.api.Select(rightPresent, eRightCalc, wRight)
 
-		childIdx = f.api.Add(childIdx, f.api.Add(leftPresent, rightPresent))
-		witnessConsumed := f.api.Add(f.api.Sub(1, leftPresent), f.api.Sub(1, rightPresent))
-		witnessIndex = f.api.Add(witnessIndex, witnessConsumed)
+			childIdx = f.api.Add(childIdx, f.api.Add(leftPresent, rightPresent))
+			witnessConsumed := f.api.Add(f.api.Sub(1, leftPresent), f.api.Sub(1, rightPresent))
+			witnessIndex = f.api.Add(witnessIndex, witnessConsumed)
 
-		eLeft := f.qm31Chip.DecodeNative(eLeftEncoded)
-		eRight := f.qm31Chip.DecodeNative(eRightEncoded)
+			eLeft := f.qm31Chip.DecodeNative(eLeftEncoded)
+			eRight := f.qm31Chip.DecodeNative(eRightEncoded)
 
-		pairedEvals = append(pairedEvals, [2]m31.QM31{eLeft, eRight})
+			pairedEvals = append(pairedEvals, [2]m31.QM31{eLeft, eRight})
 
-		leftEvalComponents := eLeft.Components()
-		pairedEvalsFlattened = append(pairedEvalsFlattened, leftEvalComponents[0], leftEvalComponents[1], leftEvalComponents[2], leftEvalComponents[3])
-		rightEvalComponents := eRight.Components()
-		pairedEvalsFlattened = append(pairedEvalsFlattened, rightEvalComponents[0], rightEvalComponents[1], rightEvalComponents[2], rightEvalComponents[3])
+			leftEvalComponents := eLeft.Components()
+			pairedEvalsFlattened = append(pairedEvalsFlattened, leftEvalComponents[0], leftEvalComponents[1], leftEvalComponents[2], leftEvalComponents[3])
+			rightEvalComponents := eRight.Components()
+			pairedEvalsFlattened = append(pairedEvalsFlattened, rightEvalComponents[0], rightEvalComponents[1], rightEvalComponents[2], rightEvalComponents[3])
 
-		queryInitials = append(queryInitials, reverseBitIndex(f.api, f.uapi, leftChild, logSize))
+			queryInitials = append(queryInitials, reverseBitIndex(f.api, f.uapi, leftChild, logSize))
+		}
+	} else {
+		// No parent queries: process each query directly as a pair
+		// Each query becomes a left position, and we need witness for right position
+		for i, query := range queriesLayer {
+			// Calculate left and right positions for this subset
+			queryBits := f.api.ToBinary(query, 32)
+			// Clear lowest bit to get left position (subset start)
+			leftBits := queryBits[:31]
+			leftBits = append(leftBits, frontend.Variable(0))
+			leftChild := f.api.FromBinary(leftBits...)
+
+			// Check if query is left or right
+			isLeft := f.api.IsZero(queryBits[0]) // If lowest bit is 0, it's left
+
+			// Get evaluation for this query
+			eQueryEncoded := evalAtQueries.Lookup(frontend.Variable(i))[0]
+
+			// Get witness for the sibling position
+			eSiblingEncoded := witnessTable.Lookup(witnessIndex)[0]
+			witnessIndex = f.api.Add(witnessIndex, 1)
+
+			// Determine left and right evaluations based on whether query is left or right
+			eLeftEncoded := f.api.Select(isLeft, eQueryEncoded, eSiblingEncoded)
+			eRightEncoded := f.api.Select(isLeft, eSiblingEncoded, eQueryEncoded)
+
+			eLeft := f.qm31Chip.DecodeNative(eLeftEncoded)
+			eRight := f.qm31Chip.DecodeNative(eRightEncoded)
+
+			pairedEvals = append(pairedEvals, [2]m31.QM31{eLeft, eRight})
+
+			leftEvalComponents := eLeft.Components()
+			pairedEvalsFlattened = append(pairedEvalsFlattened, leftEvalComponents[0], leftEvalComponents[1], leftEvalComponents[2], leftEvalComponents[3])
+			rightEvalComponents := eRight.Components()
+			pairedEvalsFlattened = append(pairedEvalsFlattened, rightEvalComponents[0], rightEvalComponents[1], rightEvalComponents[2], rightEvalComponents[3])
+
+			queryInitials = append(queryInitials, reverseBitIndex(f.api, f.uapi, leftChild, logSize))
+		}
 	}
 
 	return pairedEvalsFlattened, SparseEvaluations{queryInitials: queryInitials, evals: pairedEvals}, witnessIndex

@@ -1,15 +1,23 @@
 package main
 
 import (
+	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math/big"
 	"os"
 
 	"github.com/HerodotusDev/stwo-gnark-verifier/variables"
 	"github.com/HerodotusDev/stwo-gnark-verifier/verifier"
 	"github.com/consensys/gnark-crypto/ecc"
+	fr_bn254 "github.com/consensys/gnark-crypto/ecc/bn254/fr"
+	"github.com/consensys/gnark/backend"
 	"github.com/consensys/gnark/backend/groth16"
+	groth16_bn254 "github.com/consensys/gnark/backend/groth16/bn254"
+	"github.com/consensys/gnark/backend/solidity"
+	"github.com/consensys/gnark/backend/witness"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/frontend/cs/r1cs"
 )
@@ -132,6 +140,22 @@ func main() {
 	}
 	fmt.Println("✓ Setup completed")
 
+	// Export Solidity verifier
+	fmt.Println("\nExporting Solidity verifier...")
+	solidityFile, err := os.Create("Verifier.sol")
+	if err != nil {
+		fmt.Printf("Error creating Solidity file: %v\n", err)
+		os.Exit(1)
+	}
+	defer solidityFile.Close()
+
+	err = vk.ExportSolidity(solidityFile)
+	if err != nil {
+		fmt.Printf("Error exporting Solidity verifier: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("✓ Solidity verifier exported to Verifier.sol")
+
 	// ╔══════════════════════════════════╗
 	// ║        Witness Generation        ║
 	// ╚══════════════════════════════════╝
@@ -152,7 +176,7 @@ func main() {
 	// ║         Proof Generation         ║
 	// ╚══════════════════════════════════╝
 	fmt.Println("\nGenerating Groth16 proof...")
-	proof, err := groth16.Prove(r1cs, pk, witness)
+	proof, err := groth16.Prove(r1cs, pk, witness, solidity.WithProverTargetSolidityVerifier(backend.GROTH16))
 	if err != nil {
 		fmt.Printf("Error in proof generation: %v\n", err)
 		os.Exit(1)
@@ -160,10 +184,37 @@ func main() {
 	fmt.Println("✓ Groth16 proof generated")
 
 	// ╔══════════════════════════════════╗
+	// ║         Export Proof Data        ║
+	// ╚══════════════════════════════════╝
+	fmt.Println("\nExporting proof and witness for Solidity...")
+	fmt.Printf("Proof: %v\n", proof)
+	// Write to raw proof:
+	bn254Proof := proof.(*groth16_bn254.Proof)
+	bn254ProofBytes := bn254Proof.MarshalSolidity()
+	fmt.Printf("Proof bytes (hex): %s\n", hex.EncodeToString(bn254ProofBytes))
+	
+	fmt.Printf("Proof bytes raw: %v\n", bn254ProofBytes)
+	// Export using proper gnark serialization
+	err = exportSolidityProofAndWitness(proof, publicWitness)
+	if err != nil {
+		fmt.Printf("Error exporting Solidity data: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("✓ Proof and witness exported to proof_solidity.json and witness_solidity.json")
+
+	// Export raw proof as hex
+	err = exportProofAsHex(proof)
+	if err != nil {
+		fmt.Printf("Error exporting proof as hex: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("✓ Proof exported as hex to proof_raw.hex")
+
+	// ╔══════════════════════════════════╗
 	// ║           Verification           ║
 	// ╚══════════════════════════════════╝
 	fmt.Println("\nVerifying Groth16 proof...")
-	err = groth16.Verify(proof, vk, publicWitness)
+	err = groth16.Verify(proof, vk, publicWitness, solidity.WithVerifierTargetSolidityVerifier(backend.GROTH16))
 	if err != nil {
 		fmt.Printf("✗ Verification failed: %v\n", err)
 		os.Exit(1)
@@ -193,4 +244,143 @@ func loadStarkProofFromFile(path string) (*variables.StarkProofRaw, error) {
 
 func buildStarkProofFromRaw(raw *variables.StarkProofRaw) variables.StarkProof {
 	return variables.BuildStarkProof(raw)
+}
+
+// SolidityProof represents proof data for Solidity verifier
+type SolidityProof struct {
+	Proof         [8]string `json:"proof"`
+	Commitments   [2]string `json:"commitments"`
+	CommitmentPok [2]string `json:"commitmentPok"`
+}
+
+// exportSolidityProofAndWitness exports proof and witness in JSON format for Solidity
+func exportSolidityProofAndWitness(proof groth16.Proof, wit witness.Witness) error {
+	// Convert proof to BN254 type
+	g16proof, ok := proof.(*groth16_bn254.Proof)
+	if !ok {
+		return fmt.Errorf("expected groth16_bn254.Proof, got %T", proof)
+	}
+
+	// Extract proof components in Solidity format (as strings to avoid formatting issues)
+	solProof := SolidityProof{
+		Proof: [8]string{
+			g16proof.Ar.X.BigInt(new(big.Int)).String(),
+			g16proof.Ar.Y.BigInt(new(big.Int)).String(),
+			g16proof.Bs.X.A1.BigInt(new(big.Int)).String(),
+			g16proof.Bs.X.A0.BigInt(new(big.Int)).String(),
+			g16proof.Bs.Y.A1.BigInt(new(big.Int)).String(),
+			g16proof.Bs.Y.A0.BigInt(new(big.Int)).String(),
+			g16proof.Krs.X.BigInt(new(big.Int)).String(),
+			g16proof.Krs.Y.BigInt(new(big.Int)).String(),
+		},
+		Commitments: [2]string{
+			g16proof.Commitments[0].X.BigInt(new(big.Int)).String(),
+			g16proof.Commitments[0].Y.BigInt(new(big.Int)).String(),
+		},
+		CommitmentPok: [2]string{
+			g16proof.CommitmentPok.X.BigInt(new(big.Int)).String(),
+			g16proof.CommitmentPok.Y.BigInt(new(big.Int)).String(),
+		},
+	}
+
+	// Export proof to JSON
+	proofJSON, err := json.MarshalIndent(solProof, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal proof: %w", err)
+	}
+	err = os.WriteFile("proof_solidity.json", proofJSON, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write proof file: %w", err)
+	}
+
+	// Extract witness values as string array (to avoid formatting issues)
+	// wit is already public witness, extract its vector representation
+	witVec := wit.Vector().(fr_bn254.Vector)
+	witnessValues := make([]string, len(witVec))
+	for i := range witVec {
+		bi := new(big.Int)
+		witVec[i].BigInt(bi)
+		witnessValues[i] = bi.String()
+	}
+
+	// Export witness as JSON array
+	witnessJSON, err := json.MarshalIndent(witnessValues, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal witness: %w", err)
+	}
+
+	err = os.WriteFile("witness_solidity.json", witnessJSON, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write witness file: %w", err)
+	}
+
+	return nil
+}
+
+// exportProofAsHex exports the proof as a single hex string (uncompressed format for Solidity)
+func exportProofAsHex(proof groth16.Proof) error {
+	// Convert proof to BN254 type
+	g16proof, ok := proof.(*groth16_bn254.Proof)
+	if !ok {
+		return fmt.Errorf("expected groth16_bn254.Proof, got %T", proof)
+	}
+
+	// Debug: print commitment and commitmentPok values
+	fmt.Println("\nDebug - Proof components:")
+	fmt.Printf("Ar: X=%s, Y=%s\n", g16proof.Ar.X.BigInt(new(big.Int)).String(), g16proof.Ar.Y.BigInt(new(big.Int)).String())
+	fmt.Printf("Krs: X=%s, Y=%s\n", g16proof.Krs.X.BigInt(new(big.Int)).String(), g16proof.Krs.Y.BigInt(new(big.Int)).String())
+	if len(g16proof.Commitments) > 0 {
+		fmt.Printf("Commitment[0]: X=%s, Y=%s\n",
+			g16proof.Commitments[0].X.BigInt(new(big.Int)).String(),
+			g16proof.Commitments[0].Y.BigInt(new(big.Int)).String())
+	}
+	fmt.Printf("CommitmentPok: X=%s, Y=%s\n",
+		g16proof.CommitmentPok.X.BigInt(new(big.Int)).String(),
+		g16proof.CommitmentPok.Y.BigInt(new(big.Int)).String())
+
+	var buf bytes.Buffer
+
+	// Write Ar (G1 point: X, Y) - 2 * 32 bytes
+	buf.Write(g16proof.Ar.X.BigInt(new(big.Int)).FillBytes(make([]byte, 32)))
+	buf.Write(g16proof.Ar.Y.BigInt(new(big.Int)).FillBytes(make([]byte, 32)))
+
+	// Write Bs (G2 point: X.A1, X.A0, Y.A1, Y.A0) - 4 * 32 bytes
+	buf.Write(g16proof.Bs.X.A1.BigInt(new(big.Int)).FillBytes(make([]byte, 32)))
+	buf.Write(g16proof.Bs.X.A0.BigInt(new(big.Int)).FillBytes(make([]byte, 32)))
+	buf.Write(g16proof.Bs.Y.A1.BigInt(new(big.Int)).FillBytes(make([]byte, 32)))
+	buf.Write(g16proof.Bs.Y.A0.BigInt(new(big.Int)).FillBytes(make([]byte, 32)))
+
+	// Write Krs (G1 point: X, Y) - 2 * 32 bytes
+	buf.Write(g16proof.Krs.X.BigInt(new(big.Int)).FillBytes(make([]byte, 32)))
+	buf.Write(g16proof.Krs.Y.BigInt(new(big.Int)).FillBytes(make([]byte, 32)))
+
+	// Write commitment count (4 bytes, big-endian)
+	commitmentCount := len(g16proof.Commitments)
+	commitmentCountBytes := make([]byte, 4)
+	commitmentCountBytes[0] = 0
+	commitmentCountBytes[1] = 0
+	commitmentCountBytes[2] = 0
+	commitmentCountBytes[3] = byte(commitmentCount)
+	buf.Write(commitmentCountBytes)
+
+	// Write commitments (each is G1 point: X, Y)
+	for _, commitment := range g16proof.Commitments {
+		buf.Write(commitment.X.BigInt(new(big.Int)).FillBytes(make([]byte, 32)))
+		buf.Write(commitment.Y.BigInt(new(big.Int)).FillBytes(make([]byte, 32)))
+	}
+
+	// Write commitmentPok (G1 point: X, Y)
+	buf.Write(g16proof.CommitmentPok.X.BigInt(new(big.Int)).FillBytes(make([]byte, 32)))
+	buf.Write(g16proof.CommitmentPok.Y.BigInt(new(big.Int)).FillBytes(make([]byte, 32)))
+
+	// Convert to hex string
+	hexString := hex.EncodeToString(buf.Bytes())
+
+	// Write to file
+	err := os.WriteFile("proof_raw.hex", []byte(hexString), 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write hex file: %w", err)
+	}
+
+	return nil
 }

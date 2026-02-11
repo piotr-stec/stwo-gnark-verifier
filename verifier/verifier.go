@@ -62,17 +62,8 @@ func NewVerifierChip(api frontend.API) *VerifierChip {
 //   - proof is the STARK proof to verify (includes composition polynomial)
 //   - params contains verification parameters (components, tree info, digest, etc.)
 func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.VerificationParams, shape variables.CircuitData) {
-	// DEBUG: Check if TreeRoots are available
-	// fmt.Printf("DEBUG Verify: len(params.TreeRoots) = %d\n", len(params.TreeRoots))
-	// if len(params.TreeRoots) > 0 {
-	// 	fmt.Printf("DEBUG Verify: params.TreeRoots[0][0] = %v\n", params.TreeRoots[0][0])
-	// }
-	// fmt.Printf("DEBUG Verify: params.Digest[0] = %v\n", params.Digest[0])
-
 	// // Initialize channel with digest and nDraws (like Solidity's initializeWith)
 	c.channel.InitializeWith(params.Digest, params.NDraws)
-
-	// c.channel.DebugPrint("After initialization")
 
 	// Initialize commitment scheme verifier with tree information
 	// This already mixes all commitments (including composition poly) into the channel
@@ -148,7 +139,6 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 	friRandomCoeff := c.channel.DrawFelt()
 	fmt.Printf("Random coeff = %v", friRandomCoeff)
 
-	// fmt.Printf("Debug commiyment verifier log sizes: %v\n", commitmentVerifier.TreeColumnLogSizes)
 
 	// // Compute bounds (column log sizes deduped, in decreasing order and not blew up)
 	bounds := commitmentVerifier.Bounds2(shape)
@@ -163,10 +153,7 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 	// Proof of work
 	c.channel.MixAndCheckPowNonce(proof.ProofOfWork, int(commitmentVerifier.PcsConfig.PowBits))
 	c.channel.DebugPrint("After mix and check proof of work")
-	// Proof of work
-	// c.channel.CheckPowNonce(proof.ProofOfWork, int(commitmentVerifier.PcsConfig.PowBits))
-	// c.channel.MixU64(proof.ProofOfWork)
-	// c.channel.DebugPrint("After mix proof of work")
+
 
 	// ╔══════════════════════════════════╗
 	// ║              Queries             ║

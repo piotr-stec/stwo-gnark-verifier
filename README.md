@@ -121,3 +121,9 @@ This implementation is currently under active development.
 - **[Gnark](https://github.com/Consensys/gnark)** — A fast ZK-SNARK library providing high-level APIs for designing arithmetic circuits in Go.
 
 ---
+
+
+## Run main command
+```bash
+go run main.go --proof <proof_JSON> --params <params_JSON> --shape <shape_JSON>
+```

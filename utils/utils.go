@@ -40,8 +40,13 @@ func ToLookupTable(api frontend.API, table [][]frontend.Variable) []logderivlook
 	lookupTables := make([]logderivlookup.Table, len(table))
 	for i, slice := range table {
 		lookupTables[i] = logderivlookup.New(api)
-		for _, value := range slice {
-			lookupTables[i].Insert(value)
+		if len(slice) > 0 {
+			for _, value := range slice {
+				lookupTables[i].Insert(value)
+			}
+		} else {
+			// If slice is empty, add a dummy entry before sentinel
+			lookupTables[i].Insert(frontend.Variable(0))
 		}
 		// We append a dummy value to the end of the lookup table.
 		// This is because when, for instance, handling the last query (queries[j]) of a layer the vcs verifier also
