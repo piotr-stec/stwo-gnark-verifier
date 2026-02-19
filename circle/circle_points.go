@@ -122,6 +122,38 @@ func (c *CircleChip) BaseMul(p BasePoint, scalar uints.U32) BasePoint {
 	return res
 }
 
+// BaseMulSigned multiplies a base circle point by a signed 32-bit offset.
+// Analogous to Solidity's CirclePointM31.mulSigned and Rust's CirclePoint::mul_signed
+// If offset >= 0: returns p * offset
+// If offset < 0: returns -p * |offset| (conjugate then multiply)
+func (c *CircleChip) BaseMulSigned(p BasePoint, signedOffset frontend.Variable) BasePoint {
+	// Check if offset is negative (bit 31 set in int32 representation)
+	offsetBits := c.api.ToBinary(signedOffset, 32)
+	isNegative := offsetBits[31]
+
+	// Get absolute value: if negative, abs = 2^32 - offset
+	absOffset := c.api.Select(
+		isNegative,
+		c.api.Sub(frontend.Variable(1<<32), signedOffset),
+		signedOffset,
+	)
+
+	// Convert to U32
+	absOffsetU32 := c.uapi.ValueOf(absOffset)
+
+	// Multiply by absolute value
+	result := c.BaseMul(p, absOffsetU32)
+
+	// Negate if original offset was negative
+	negResult := c.BaseNeg(result)
+
+	// Select based on sign
+	return BasePoint{
+		X: m31.NewM31Unchecked(c.api.Select(isNegative, negResult.X.Variable(), result.X.Variable())),
+		Y: m31.NewM31Unchecked(c.api.Select(isNegative, negResult.Y.Variable(), result.Y.Variable())),
+	}
+}
+
 // ╔══════════════════════════════════╗
 // ║         Circle Point Index       ║
 // ╚══════════════════════════════════╝
@@ -141,6 +173,11 @@ func newPointIndex(c *CircleChip, value uints.U32) CirclePointIndex {
 // Point returns the circle point corresponding to the index.
 func (i CirclePointIndex) Point() BasePoint {
 	return i.circleChip.BaseMul(baseCircleGenerator, i.value)
+}
+
+// Value returns the U32 value of the index.
+func (i CirclePointIndex) Value() uints.U32 {
+	return i.value
 }
 
 // Neg returns the negation of the point index.
