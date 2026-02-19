@@ -78,27 +78,18 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 	cpTreeIdx := numTrees - 1
 
 	// Commit to Composition Polynomial
-	// In Solidity: _performCompositionCommit
 	// compositionLogDegreeBound is the degree bound, we need commitment domain log size
 	compositionLogDegreeBound := params.ComponentsCompositionLogDegreeBound
 	logBlowupFactor := commitmentVerifier.PcsConfig.FriConfig.LogBlowupFactor
 	compositionCommitmentLogSize := compositionLogDegreeBound + logBlowupFactor
-	fmt.Printf("DEBUG Verify: compositionLogDegreeBound = %v, commitmentLogSize = %v\n", compositionLogDegreeBound, compositionCommitmentLogSize)
 	compositionSizes := []int{compositionCommitmentLogSize, compositionCommitmentLogSize, compositionCommitmentLogSize, compositionCommitmentLogSize}
-	fmt.Printf("Debug commitment verifier log sizes: %v\n", commitmentVerifier.TreeColumnLogSizes)
 	commitmentVerifier.Commit(
 		cpTreeIdx,
 		proof.Commitments[cpTreeIdx],
 		compositionSizes,
 		c.channel,
 	)
-	
-	fmt.Printf("Debug commitment verifier log sizes: %v\n", commitmentVerifier.TreeColumnLogSizes)
 
-	// // Debug print compostion sizes
-	// fmt.Printf("DEBUG Verify: compositionSizes = %v\n", proof.Commitments[cpTreeIdx])
-	// // DEBUG: Print channel state after composition commit
-	// c.channel.DebugPrint("After composition commit")
 
 	// ╔══════════════════════════════════╗
 	// ║               OODS               ║
@@ -107,8 +98,6 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 	// Verify OODS: get random point and evaluate constraints
 	oodsPoint := c.circle.GetRandomPoint(c.channel)
 
-	// DEBUG: Print OODS point
-	fmt.Printf("DEBUG Verify: oodsPoint = %v\n", oodsPoint)
 
 	// Extract CP evaluation from sampled values (last tree in sampled values)
 	// SampledValues is [tree][column][point]
@@ -133,27 +122,18 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 	// Mix flatten sampled values into channel
 	flattenedSampledValues := utils.FlattenTree(utils.FlattenTree(proof.SampledValues))
 	c.channel.MixFelts(flattenedSampledValues)
-	c.channel.DebugPrint("After flattened sampled values")
 
 	// Draw random coeff for FRI
 	friRandomCoeff := c.channel.DrawFelt()
-	fmt.Printf("Random coeff = %v", friRandomCoeff)
-
 
 	// // Compute bounds (column log sizes deduped, in decreasing order and not blew up)
 	bounds := commitmentVerifier.Bounds2(shape)
-	fmt.Printf("bounds = %v\n", bounds)
-	c.channel.DebugPrint("Before New Fri verifier")
 
 	// Verification of commitment stage of FRI
 	friVerifier := fri.NewFriVerifier(c.api, c.uapi, c.channel, c.qm31, c.circle, commitmentVerifier.PcsConfig.FriConfig, proof.FriProof, bounds, shape)
-	c.channel.DebugPrint("After New Fri verifier")
-	fmt.Printf("DEBUG Verify: Before CheckPowNonce\n")
 
 	// Proof of work
 	c.channel.MixAndCheckPowNonce(proof.ProofOfWork, int(commitmentVerifier.PcsConfig.PowBits))
-	c.channel.DebugPrint("After mix and check proof of work")
-
 
 	// ╔══════════════════════════════════╗
 	// ║              Queries             ║
@@ -161,16 +141,13 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 	maxLogSize := bounds[0]
 
 	baseLayerQueries := c.channel.GenerateBaseLayerQueries2(maxLogSize, commitmentVerifier.PcsConfig.FriConfig.NQueries)
-	fmt.Printf("baseLayerQueries generate = %v\n", baseLayerQueries)
 
 	// fmt.Printf("After base layerqueries generate")
-	fmt.Printf("Max log size shape: %v", shape.MaxLogSize)
 
 	// Generate all queries for all layers
 	queries2 := utils.GenerateQueries2(c.api, baseLayerQueries, commitmentVerifier.PcsConfig.FriConfig.NQueries, shape.DedupedQueriesShape, shape.MaxLogSize)
 
 	queriesLookup := utils.ToLookupTable(c.api, queries2)
-		fmt.Printf("Genereted queries: %v\n", queries2)
 
 	// ╔══════════════════════════════════╗
 	// ║        Trace decommitments       ║
@@ -181,9 +158,8 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 		if tree == nil {
 			continue
 		}
-		fmt.Printf("Tree column log sizes: %v\n", tree.ColumnLogSizes)
 		// We need to pass valid query positions for this tree's log sizes
-		// if( len(tree.ColumnLogSizes) != len(shape.DedupedQueriesShape) ){ 
+		// if( len(tree.ColumnLogSizes) != len(shape.DedupedQueriesShape) ){
 		// 	panic("Mismatch in column log sizes and deduped query shape lengths")
 		// }
 		tree.Verify2(queriesLookup, proof.QueriedValues[treeIndex], proof.Decommitments[treeIndex], shape.DedupedQueriesShape, shape.QueriesBranching)
@@ -201,19 +177,15 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 		compositionMaskPoints[i] = []circle.Point{oodsPoint}
 	}
 	maskPoints = append(maskPoints, compositionMaskPoints)
-	fmt.Printf("DEBUG Verify: maskPoints after composition = %v\n", maskPoints)
 
 	// fmt.Printf("Queries = %v\n", queries)
 	// fmt.Printf("Sampled values proof = %v\n", proof.SampledValues)
-	// // Verify FRI quotients
-	friAnswers := friVerifier.FriQuotientEvaluations2(proof.SampledValues, maskPoints, queries2, proof.QueriedValues, friRandomCoeff, shape)
-	fmt.Printf("After FRI Quotient Evaluations\n")
-	fmt.Printf("Fri answers = %v\n", friAnswers)
-
-	friAnswersEncoded := fri.EncodeFriAnswers(c.qm31, friAnswers)
+	// Verify FRI quotients
+	friAnswersComputed := friVerifier.FriQuotientEvaluations2(proof.SampledValues, maskPoints, queries2, proof.QueriedValues, friRandomCoeff, shape)
+	friAnswersEncoded := fri.EncodeFriAnswers(c.qm31, friAnswersComputed)
 
 	friAnswersLookup := utils.ToLookupTable(c.api, friAnswersEncoded)
-	fmt.Printf("After to Lookup table=%v\n",friAnswersLookup)
+	fmt.Printf("After to Lookup table=%v\n", friAnswersLookup)
 
 	friVerifier.Verify2(queriesLookup, friAnswersLookup, shape)
 }
