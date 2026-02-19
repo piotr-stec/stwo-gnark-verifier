@@ -1,10 +1,7 @@
 package circle
 
 import (
-	"fmt"
-
 	"github.com/HerodotusDev/stwo-gnark-verifier/m31"
-	// "github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/std/math/uints"
 )
 
@@ -18,11 +15,9 @@ type LinePoly struct {
 // This is based on the Rust implementation:
 // pub fn eval_at_point(&self, mut x: SecureField) -> SecureField
 func (lp LinePoly) EvalAt(qm31Chip *m31.QM31Chip, x m31.QM31) m31.QM31 {
-	fmt.Println("EvalAt: start")
 	// logSize is log2(len(coeffs))
 	// We need to compute doublings for each level of recursion
 	n := len(lp.Coeffs)
-	fmt.Printf("EvalAt: n=%d\n", n)
 	if n == 0 {
 		return qm31Chip.Zero()
 	}
@@ -42,38 +37,28 @@ func (lp LinePoly) EvalAt(qm31Chip *m31.QM31Chip, x m31.QM31) m31.QM31 {
 		logSize++
 		temp >>= 1
 	}
-	fmt.Printf("EvalAt: logSize=%d\n", logSize)
 
 	// Build doublings: [x, x^2, x^4, x^8, ...]
 	// where x^2 = double_x(x) = 2*x^2 - 1
 	doublings := make([]m31.QM31, logSize)
 	currentX := x
-	fmt.Println("EvalAt: building doublings")
 	for i := 0; i < logSize; i++ {
 		doublings[i] = currentX
 		// double_x: 2*x^2 - 1
 		currentX = doubleX(qm31Chip, currentX)
-		fmt.Printf("EvalAt: doubling[%d] done\n", i)
 	}
 
 	// Fold the coefficients using the doublings
-	fmt.Println("EvalAt: calling fold")
 	result := fold(qm31Chip, circuitCoeffs, doublings)
-	fmt.Println("EvalAt: fold done")
 	return result
 }
 
 // doubleX implements CirclePoint::double_x: 2*x^2 - 1
 func doubleX(qm31Chip *m31.QM31Chip, x m31.QM31) m31.QM31 {
-	fmt.Println("doubleX: start")
 	xSquared := qm31Chip.Mul(x, x)
-	fmt.Println("doubleX: xSquared done")
 	doubled := qm31Chip.Add(xSquared, xSquared) // 2*x^2
-	fmt.Println("doubleX: doubled done")
 	one := qm31Chip.One()
-	fmt.Println("doubleX: one constructed")
 	result := qm31Chip.Sub(doubled, one) // 2*x^2 - 1
-	fmt.Println("doubleX: sub done")
 	return result
 }
 

@@ -98,7 +98,6 @@ func NewMerkleVerifier(api frontend.API, uapi *uints.BinaryField[uints.U32], roo
 			maxLogSize = i
 		}
 	}
-	fmt.Printf("Max log size in NewMerkleVerifier = %d\n", maxLogSize)
 	return &MerkleVerifier{
 		api:                api,
 		uapi:               uapi,

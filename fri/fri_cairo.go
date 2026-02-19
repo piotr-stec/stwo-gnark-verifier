@@ -1,8 +1,6 @@
 package fri
 
 import (
-	"fmt"
-
 	"github.com/HerodotusDev/stwo-gnark-verifier/m31"
 	"github.com/HerodotusDev/stwo-gnark-verifier/utils"
 	"github.com/HerodotusDev/stwo-gnark-verifier/variables"
@@ -25,110 +23,7 @@ func (f *FriVerifier) Verify2(queries []logderivlookup.Table, evaluations []logd
 // ╚══════════════════════════════════╝
 
 func (f *FriVerifier) verifyFirstLayer2(queries []logderivlookup.Table, evaluations []logderivlookup.Table, circuitData variables.CircuitData) []SparseEvaluations {
-	// // compute the decommitment positions (queries and their siblings dedupped) and build the matching decommitments values
-	// decommitmentPositions := make([]logderivlookup.Table, 32)
-	// sparseEvaluationsFlattened := make([]m31.M31, 0)
-	// sparseEvaluations := make([]SparseEvaluations, 0)
-	// previousFriWitnessIndex := 0
-
-	// columnBoundsIndex := 0
-	// maxLogSize := shape.ColumnBounds[0]
-	// fmt.Printf("Max log size in verify first layer: %d\n", maxLogSize)
-
-	// queriesShape := make([]int, 32)
-
-	// // build the merkle tree decommitment for the fri answers
-	// // for each layer there either is FRI answers or not
-	// // if there are FRI answers, we compute the decommitment positions and the sparse evaluations from the FRI answers
-	// // if there are no FRI answers, we just fold the previous layer queries
-	// for logSize := maxLogSize; logSize >= 0; logSize-- {
-	// 	fmt.Printf("Processing logSize=%d, len(DedupedQueriesShape)=%d, len(QueriesBranching)=%d\n", logSize, len(shape.DedupedQueriesShape), len(shape.QueriesBranching))
-	// 	fmt.Printf("Column bounds index=%d, shape.ColumnBounds[columnBoundsIndex]%v\n", columnBoundsIndex, shape.ColumnBounds[columnBoundsIndex]	)
-	// 	if columnBoundsIndex < len(shape.ColumnBounds) && logSize == shape.ColumnBounds[columnBoundsIndex] {
-	// 		fmt.Printf("  Column bounds match, accessing queries[%d]\n", logSize)
-	// 		layerQueries := queries[logSize]
-	// 		fmt.Printf("  Got layerQueries\n")
-	// 		// compute local data
-	// 		layerDecommitmentPositions, layerSparseEvaluationsFlattened, sparseEvaluation, friWitnessIndex := f.computeDecommitmentPositionsAndRebuildEvals(
-	// 			layerQueries,
-	// 			evaluations[columnBoundsIndex],
-	// 			f.FirstLayerVerifier.proof.FriWitness,
-	// 			previousFriWitnessIndex,
-	// 			shape.DedupedQueriesShape[logSize-1],
-	// 			logSize,
-	// 			shape,
-	// 		)
-	// 		previousFriWitnessIndex = friWitnessIndex
-
-	// 		// dummy values to simulate the unused children queries of the last query (if it is on the right) of a layer
-	// 		layerDecommitmentPositions.Insert(frontend.Variable(1 << 32))
-	// 		layerDecommitmentPositions.Insert(frontend.Variable(1 << 32))
-
-	// 		// update global data
-	// 		decommitmentPositions[logSize] = layerDecommitmentPositions
-	// 		sparseEvaluations = append(sparseEvaluations, sparseEvaluation)
-	// 		sparseEvaluationsFlattened = append(sparseEvaluationsFlattened, layerSparseEvaluationsFlattened...)
-	// 		// the trick here is to note that when building all the pairs of queries in a layer, we end up with
-	// 		// 2 times the number of queries in the next layer
-	// 		queriesShape[logSize] = 2 * shape.DedupedQueriesShape[logSize-1]
-	// 		columnBoundsIndex++
-	// 	} else {
-	// 		// if there are no FRI answers, we just fold the previous layer queries
-	// 		// convert the lookup table to a slice of frontend.Variable
-	// 		previousLayerQueriesLookup := decommitmentPositions[logSize+1]
-	// 		previousLayerQueries := make([]frontend.Variable, 0)
-	// 		nQueriesPreviousLayer := 0
-	// 		// if the previous layer contains fri answers
-	// 		if logSize+1 == shape.ColumnBounds[columnBoundsIndex-1] {
-	// 			nQueriesPreviousLayer = 2 * shape.DedupedQueriesShape[logSize]
-	// 		} else {
-	// 			nQueriesPreviousLayer = shape.DedupedQueriesShape[logSize+1]
-	// 		}
-	// 		for i := 0; i < nQueriesPreviousLayer; i++ {
-	// 			previousLayerQueries = append(previousLayerQueries, previousLayerQueriesLookup.Lookup(frontend.Variable(i))[0])
-	// 		}
-
-	// 		// fold the previous layer queries
-	// 		layerQueries := utils.FoldQueries(f.api, previousLayerQueries, shape.DedupedQueriesShape[logSize])
-
-	// 		// convert the slice of frontend.Variable to a lookup table
-	// 		layerQueriesLookup := logderivlookup.New(f.api)
-	// 		for _, query := range layerQueries {
-	// 			layerQueriesLookup.Insert(query)
-	// 		}
-	// 		layerQueriesLookup.Insert(frontend.Variable(1 << 32))
-	// 		layerQueriesLookup.Insert(frontend.Variable(1 << 32))
-
-	// 		queriesShape[logSize] = shape.DedupedQueriesShape[logSize]
-	// 		decommitmentPositions[logSize] = layerQueriesLookup
-	// 	}
-	// 	// all lookup tables need at least one query, this makes sure they all get one (root doesn't otherwise)
-	// 	_ = decommitmentPositions[logSize].Lookup(0)
-
-	// }
-
-	// // build the column log sizes (1 flattened QM31 column yields 4 M31 columns)
-	// columnLogSizes := make([]frontend.Variable, 0)
-	// for _, columnCommitmentDomain := range f.FirstLayerVerifier.columnCommitmentDomains {
-	// 	columnLogSizes = append(columnLogSizes, f.api.Sub(columnCommitmentDomain.LogSize(), frontend.Variable(1)))
-	// 	columnLogSizes = append(columnLogSizes, f.api.Sub(columnCommitmentDomain.LogSize(), frontend.Variable(1)))
-	// 	columnLogSizes = append(columnLogSizes, f.api.Sub(columnCommitmentDomain.LogSize(), frontend.Variable(1)))
-	// 	columnLogSizes = append(columnLogSizes, f.api.Sub(columnCommitmentDomain.LogSize(), frontend.Variable(1)))
-	// }
-
-	// nColumnsPerLogSize := make([]int, 32)
-	// for _, logSize := range shape.ColumnBounds {
-	// 	nColumnsPerLogSize[logSize] = 4
-	// }
-
-	// // verify the merkle decommitment
-	// merkleVerifier := NewMerkleVerifier(f.api, f.uapi, f.FirstLayerVerifier.proof.Commitment, columnLogSizes, nColumnsPerLogSize)
-	// firstLayerBranching := shape.FriFirstLayerBranching
-	// if len(firstLayerBranching) == 0 {
-	// 	panic("missing FRI first layer branching data")
-	// }
-	// merkleVerifier.Verify2(decommitmentPositions, sparseEvaluationsFlattened, f.FirstLayerVerifier.proof.Decommitment, queriesShape, firstLayerBranching)
-
+	
 	// return sparseEvaluations
 	// compute the decommitment positions (queries and their siblings dedupped) and build the matching decommitments values
 	decommitmentPositions := make([]logderivlookup.Table, 32)
@@ -205,6 +100,7 @@ func (f *FriVerifier) verifyFirstLayer2(queries []logderivlookup.Table, evaluati
 		_ = decommitmentPositions[logSize].Lookup(0)
 
 	}
+
 
 	// build the column log sizes (1 flattened QM31 column yields 4 M31 columns)
 	columnLogSizes := make([]frontend.Variable, 0)
@@ -405,11 +301,9 @@ func (f *FriVerifier) verifyLastLayer2(lastQueries logderivlookup.Table, lastEva
 		
 
 		xQM31 := m31.NewQM31FromM31(xM31)
-		
 
 		
 		expectedEval := f.LastLayerPoly.EvalAt(f.qm31Chip, xQM31)
-		fmt.Printf("Query %v: xQM31 = %v, expectedEval = %v\n", queryEval, xQM31, expectedEval)
 
 		f.qm31Chip.AssertEqual(queryEval, expectedEval)
 	}

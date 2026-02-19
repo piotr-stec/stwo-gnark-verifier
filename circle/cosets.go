@@ -64,6 +64,11 @@ func (c Coset) Step() CirclePointIndex {
 	return c.step
 }
 
+// Initial returns the initial point of the coset.
+func (c Coset) Initial() CirclePointIndex {
+	return c.initial
+}
+
 // ╔══════════════════════════════════╗
 // ║           Canonic Coset          ║
 // ╚══════════════════════════════════╝
@@ -120,6 +125,11 @@ func NewCircleDomain(halfCoset Coset) CircleDomain {
 // LogSize returns the log size of the circle domain.
 func (d CircleDomain) LogSize() frontend.Variable {
 	return d.halfCoset.circleChip.api.Add(d.halfCoset.logSize, frontend.Variable(1))
+}
+
+// HalfCoset returns the half coset.
+func (d CircleDomain) HalfCoset() Coset {
+	return d.halfCoset
 }
 
 // At returns the base point at the given index.
