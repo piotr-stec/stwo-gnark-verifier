@@ -14,20 +14,20 @@ import (
 // TestVerifyGeneric tests the generic Verify function with separate JSON files
 func TestVerifyGeneric(t *testing.T) {
 	// Load StarkProof from JSON
-	proofPath := "../proof.json"
+	proofPath := "../example_data/merkle_proof.json"
 	proofRaw, err := loadStarkProofRaw(proofPath)
 	if err != nil {
 		t.Fatalf("Failed to load stark proof: %v", err)
 	}
 
 	// Load VerificationParams from JSON
-	paramsPath := "../params.json"
+	paramsPath := "../example_data/merkle_params.json"
 	paramsRaw, err := variables.ReadVerificationParams(paramsPath)
 	if err != nil {
 		t.Fatalf("Failed to load verification params: %v", err)
 	}
 
-	shapePath := "../fibonacci_shape.json"
+	shapePath := "../example_data/merkle_shape.json"
 	shapeRaw, err := variables.ReadCircuitShape(shapePath)
 	if err != nil {
 		t.Fatalf("Failed to load circuit shape: %v", err)
