@@ -1,12 +1,7 @@
 package components
 
 import (
-	"fmt"
-	"strings"
-
 	"github.com/HerodotusDev/stwo-gnark-verifier/circle"
-
-	// "github.com/HerodotusDev/stwo-gnark-verifier/m31"
 	"github.com/HerodotusDev/stwo-gnark-verifier/variables"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/std/math/uints"
@@ -16,8 +11,21 @@ import (
 // [tree][column][point_index]
 type TreeMaskPoints [][][]circle.Point
 
-// ComputeGenericMaskPoints computes mask points for generic verification based on VerificationParams
-// This is analogous to Rust's Components::mask_points
+// maskPointCacheKey uniquely identifies a mask point by its (logSize, signed-offset) pair.
+// Points with the same key are mathematically equal and must share the same circuit wire
+// so that FriQuotientEvaluations2's PointKey-based grouping works correctly in circuit mode.
+type maskPointCacheKey struct {
+	logSize int
+	offset  int32
+}
+
+// ComputeGenericMaskPoints computes mask points for generic verification based on VerificationParams.
+// This is analogous to Rust's Components::mask_points.
+//
+// CRITICAL: Each unique (logSize, offset) pair is computed ONCE and its circuit wire is reused
+// for all columns sharing that pair.  This ensures the fmt.Sprintf-based PointKey in
+// FriQuotientEvaluations2 correctly groups samples during circuit compilation (groth16.Prove),
+// not just during test.IsSolved evaluation.
 func ComputeGenericMaskPoints(
 	api frontend.API,
 	uapi *uints.BinaryField[uints.U32],
@@ -25,93 +33,66 @@ func ComputeGenericMaskPoints(
 	oodsPoint circle.Point,
 	params variables.VerificationParams,
 ) TreeMaskPoints {
-	// Calculate total number of trees from column log sizes
 	nTrees := len(params.TreeColumnLogSizes)
 
-	// Initialize mask points structure - start with empty, columns will be created dynamically
-	// (like Rust's TreeVec::concat_cols which doesn't pre-allocate)
 	maskPoints := make(TreeMaskPoints, nTrees)
 	for treeIdx := range maskPoints {
-		// Initialize with map to track which columns exist
 		maskPoints[treeIdx] = make([][]circle.Point, 0)
 	}
 
-	// Step 1: Process mask offsets for all components (like Rust's TreeVec::concat_cols)
-	for componentIdx, componentParam := range params.ComponentParams {
-		maskPoints = processComponentMaskOffsets(
-			api,
-			uapi,
-			circleChip,
-			oodsPoint,
-			componentParam,
-			componentIdx,
-			maskPoints,
-		)
+	// Compute traceStep for each unique logSize exactly once so that
+	// columns in different components with the same logSize share the same wire.
+	traceStepCache := make(map[int]circle.BasePoint)
+	for _, comp := range params.ComponentParams {
+		if _, exists := traceStepCache[comp.LogSize]; !exists {
+			traceStepCache[comp.LogSize] = getTraceStep(circleChip, frontend.Variable(comp.LogSize))
+		}
 	}
 
-	// Step 2: Process preprocessed columns - set them to OODS point (like Rust does at the end)
-	// This must happen AFTER all mask offsets are processed
-	maskPoints = processPreprocessedColumns(
-		maskPoints,
-		oodsPoint,
-		params,
-	)
+	// Cache computed mask points.  Offset=0 always returns oodsPoint directly so that
+	// trace columns at the OODS point share the exact same wire as composition columns
+	// (which are also set to oodsPoint in verifier.go).
+	maskCache := make(map[maskPointCacheKey]circle.Point)
 
-	// Debug: print structure
-	for treeIdx, tree := range maskPoints {
-		colCounts := make([]string, 0)
-		for colIdx, col := range tree {
-			if colIdx < 5 || colIdx >= len(tree)-2 {
-				colCounts = append(colCounts, fmt.Sprintf("[%d]=%d", colIdx, len(col)))
-			} else if colIdx == 5 {
-				colCounts = append(colCounts, "...")
+	getMaskPoint := func(logSize int, offset int) circle.Point {
+		key := maskPointCacheKey{logSize, int32(offset)}
+		if cached, ok := maskCache[key]; ok {
+			return cached
+		}
+		var mp circle.Point
+		if offset == 0 {
+			// Offset 0 → evaluation point is exactly oodsPoint; reuse the same wire.
+			mp = oodsPoint
+		} else {
+			mp = computeMaskPoint(
+				api, uapi, circleChip,
+				oodsPoint,
+				traceStepCache[logSize],
+				frontend.Variable(uint32(int32(offset))),
+			)
+		}
+		maskCache[key] = mp
+		return mp
+	}
+
+	// Step 1: Mask offsets for all components.
+	for _, componentParam := range params.ComponentParams {
+		for treeIdx, treeOffsets := range componentParam.Info.MaskOffsets {
+			for len(maskPoints) <= treeIdx {
+				maskPoints = append(maskPoints, make([][]circle.Point, 0))
+			}
+			for _, maskOffsets := range treeOffsets {
+				columnMaskPoints := make([]circle.Point, len(maskOffsets))
+				for i, offset := range maskOffsets {
+					columnMaskPoints[i] = getMaskPoint(componentParam.LogSize, offset)
+				}
+				maskPoints[treeIdx] = append(maskPoints[treeIdx], columnMaskPoints)
 			}
 		}
-		fmt.Printf("Tree %d has %d columns: %s\n", treeIdx, len(tree), strings.Join(colCounts, " "))
 	}
 
-	return maskPoints
-}
-
-// processComponentMaskOffsets processes mask offsets for a single component (ONLY offsets, no preprocessed)
-// This corresponds to the individual component.mask_points(point) call in Rust
-func processComponentMaskOffsets(
-	api frontend.API,
-	uapi *uints.BinaryField[uints.U32],
-	circleChip *circle.CircleChip,
-	oodsPoint circle.Point,
-	componentParam variables.ComponentParams,
-	componentIdx int,
-	maskPoints TreeMaskPoints,
-) TreeMaskPoints {
-	// Get trace step for this component
-	traceStep := getTraceStep(circleChip, frontend.Variable(componentParam.LogSize))
-
-	// Process mask offsets from component info (ONLY mask offsets, not preprocessed)
-	for treeIdx, treeOffsets := range componentParam.Info.MaskOffsets {
-		// Ensure tree exists and expand if needed
-		for len(maskPoints) <= treeIdx {
-			maskPoints = append(maskPoints, make([][]circle.Point, 0))
-		}
-
-		for _, maskOffsets := range treeOffsets {
-			// Compute mask points for this column
-			columnMaskPoints := make([]circle.Point, len(maskOffsets))
-			for offsetIdx, offset := range maskOffsets {
-				columnMaskPoints[offsetIdx] = computeMaskPoint(
-					api,
-					uapi,
-					circleChip,
-					oodsPoint,
-					traceStep,
-					frontend.Variable(uint32(offset)),
-				)
-			}
-
-			// Add as NEW column (like Rust TreeVec::concat_cols which adds columns, not merges)
-			maskPoints[treeIdx] = append(maskPoints[treeIdx], columnMaskPoints)
-		}
-	}
+	// Step 2: Preprocessed columns — evaluated at oodsPoint directly.
+	maskPoints = processPreprocessedColumns(maskPoints, oodsPoint, params)
 
 	return maskPoints
 }

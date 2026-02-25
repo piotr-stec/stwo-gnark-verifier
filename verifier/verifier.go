@@ -90,14 +90,12 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 		c.channel,
 	)
 
-
 	// ╔══════════════════════════════════╗
 	// ║               OODS               ║
 	// ╚══════════════════════════════════╝
 
 	// Verify OODS: get random point and evaluate constraints
 	oodsPoint := c.circle.GetRandomPoint(c.channel)
-
 
 	// Extract CP evaluation from sampled values (last tree in sampled values)
 	// SampledValues is [tree][column][point]
@@ -180,12 +178,11 @@ func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.Verif
 
 	// fmt.Printf("Queries = %v\n", queries)
 	// fmt.Printf("Sampled values proof = %v\n", proof.SampledValues)
-	// Verify FRI quotients
-	friAnswersComputed := friVerifier.FriQuotientEvaluations2(proof.SampledValues, maskPoints, queries2, proof.QueriedValues, friRandomCoeff, shape)
-	friAnswersEncoded := fri.EncodeFriAnswers(c.qm31, friAnswersComputed)
+	friAnswers := friVerifier.FriQuotientEvaluations2(proof.SampledValues, maskPoints, queries2, proof.QueriedValues, friRandomCoeff, shape)
+
+	friAnswersEncoded := fri.EncodeFriAnswers(c.qm31, friAnswers)
 
 	friAnswersLookup := utils.ToLookupTable(c.api, friAnswersEncoded)
-	fmt.Printf("After to Lookup table=%v\n", friAnswersLookup)
 
 	friVerifier.Verify2(queriesLookup, friAnswersLookup, shape)
 }
