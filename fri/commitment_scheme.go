@@ -4,8 +4,8 @@ import (
 	"sort"
 
 	"github.com/HerodotusDev/stwo-gnark-verifier/channel"
+	"github.com/HerodotusDev/stwo-gnark-verifier/utils"
 	"github.com/HerodotusDev/stwo-gnark-verifier/variables"
-		"github.com/HerodotusDev/stwo-gnark-verifier/utils"
 
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/std/math/uints"
@@ -17,7 +17,26 @@ type CommitmentSchemeVerifier struct {
 	uapi               *uints.BinaryField[uints.U32]
 	PcsConfig          variables.PcsConfig
 	Trees              []*MerkleVerifier
-	TreeColumnLogSizes [][]int 
+	TreeColumnLogSizes [][]int
+}
+
+func NewCommitmentSchemeVerifier(
+	api frontend.API,
+	uapi *uints.BinaryField[uints.U32],
+	channel *channel.Channel,
+	pcsConfig variables.PcsConfig,
+	treeRoots [][32]uints.U8,
+
+) *CommitmentSchemeVerifier {
+	numTrees := len(treeRoots)
+	verifier := &CommitmentSchemeVerifier{
+		api:       api,
+		uapi:      uapi,
+		PcsConfig: pcsConfig,
+		Trees:     make([]*MerkleVerifier, numTrees),
+	}
+
+	return verifier
 }
 
 // NewCommitmentSchemeVerifierGeneric initializes the commitment scheme verifier with generic parameters

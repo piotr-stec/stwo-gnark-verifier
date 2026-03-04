@@ -61,20 +61,32 @@ func NewVerifierChip(api frontend.API) *VerifierChip {
 // This is the main entry point for verifying proofs, analogous to Solidity's verify function
 //   - proof is the STARK proof to verify (includes composition polynomial)
 //   - params contains verification parameters (components, tree info, digest, etc.)
-func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.VerificationParams, shape variables.CircuitData) {
-	// // Initialize channel with digest and nDraws (like Solidity's initializeWith)
-	c.channel.InitializeWith(params.Digest, params.NDraws)
+func (c *VerifierChip) Verify(proof variables.StarkProof, params variables.VerificationParams, shape variables.CircuitData, publicInputs []uints.U64) {
+	// Mix public inputs into the channel
+	for _, input := range publicInputs {
+		c.channel.MixU64(input)
+	}
 
-	// Initialize commitment scheme verifier with tree information
-	// This already mixes all commitments (including composition poly) into the channel
-	commitmentVerifier := c.initializeCommitmentScheme(proof, params)
+	numTrees := len(proof.Commitments)
+	// Create commitment verifier
+	commitmentVerifier := c.createCommitmentVerifier(proof, params)
+
+	// Commit into commtiment scheme
+	for treeIndex := 0; treeIndex < numTrees-1; treeIndex++ {
+		// Skip the last tree which is the composition polynomial tree
+		commitmentVerifier.Commit(
+			treeIndex,
+			proof.Commitments[treeIndex],
+			params.TreeColumnLogSizes[treeIndex],
+			c.channel,
+		)
+	}
 
 	// Draw random coefficient for OODS from channel
 	randomCoeff := c.channel.DrawFelt()
 	_ = randomCoeff
 
 	// Composition polynomial is the last tree
-	numTrees := len(proof.Commitments)
 	cpTreeIdx := numTrees - 1
 
 	// Commit to Composition Polynomial
@@ -197,6 +209,16 @@ func (c *VerifierChip) initializeCommitmentScheme(proof variables.StarkProof, pa
 		proof.Config,
 		params.TreeRoots,
 		params.TreeColumnLogSizes,
+	)
+}
+
+func (c *VerifierChip) createCommitmentVerifier(proof variables.StarkProof, params variables.VerificationParams) *fri.CommitmentSchemeVerifier {
+	return fri.NewCommitmentSchemeVerifier(
+		c.api,
+		c.uapi,
+		c.channel,
+		proof.Config,
+		params.TreeRoots,
 	)
 }
 

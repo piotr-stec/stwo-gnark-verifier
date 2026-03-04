@@ -51,6 +51,7 @@ type VerificationParams struct {
 	NDraws frontend.Variable
 }
 
+
 // CircuitData contains additional data used to compile the circuit.
 // Fields are constants and specific to a given proof.
 type CircuitData struct {

@@ -20,22 +20,25 @@ import (
 	"github.com/consensys/gnark/backend/witness"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/frontend/cs/r1cs"
+	"github.com/consensys/gnark/std/math/uints"
 )
 
 // GenericVerifierCircuit is the circuit for verifying with generic AIR support
+// Fibonacci example that proves that initial value A and B will produce TargetValue after N steps.
 type GenericVerifierCircuit struct {
-	// StarkProof from proof.json
-	Proof variables.StarkProof `gnark:",public"`
-	// VerificationParams from params.json (part of public witness)
-	Params variables.VerificationParams `gnark:",public"`
-	// CircuitData from _shape.json (part of public witness)
-	Shape variables.CircuitData `gnark:",public"`
+	Proof       variables.StarkProof         `gnark:"-"`
+	Params      variables.VerificationParams `gnark:"-"`
+	Shape       variables.CircuitData        `gnark:"-"`
+	LogSize     uints.U64                    `gnark:",public"`
+	InitialA    uints.U64                    `gnark:",public"`
+	InitialB    uints.U64                    `gnark:",public"`
+	TargetValue uints.U64                    `gnark:",public"`
 }
 
 // Define defines the circuit for generic verification
 func (c *GenericVerifierCircuit) Define(api frontend.API) error {
 	verifierChip := verifier.NewVerifierChip(api)
-	verifierChip.Verify(c.Proof, c.Params, c.Shape)
+	verifierChip.Verify(c.Proof, c.Params, c.Shape, []uints.U64{c.LogSize, c.InitialA, c.InitialB, c.TargetValue})
 	return nil
 }
 
@@ -44,6 +47,7 @@ func main() {
 	proofPath := flag.String("proof", "proof.json", "Path to proof JSON file")
 	paramsPath := flag.String("params", "params.json", "Path to params JSON file")
 	shapePath := flag.String("shape", "", "Path to shape JSON file (optional, uses default fixture if not provided)")
+	publicInputsPath := flag.String("public-inputs", "public_inputs.json", "Path to public inputs JSON file")
 	flag.Parse()
 
 	fmt.Println("╔════════════════════════════════════════════════════╗")
@@ -90,6 +94,21 @@ func main() {
 	fmt.Println("✓ Circuit shape loaded successfully")
 
 	// ╔══════════════════════════════════╗
+	// ║      Load Public Inputs          ║
+	// ╚══════════════════════════════════╝
+	fmt.Printf("Loading public inputs from: %s\n", *publicInputsPath)
+	publicInputsRaw, err := loadFibonacciPublicInputsRaw(*publicInputsPath)
+	if err != nil {
+		fmt.Printf("Error loading public inputs: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("✓ Public inputs loaded successfully")
+	fmt.Printf("  - LogSize: %d\n", publicInputsRaw.LogSize)
+	fmt.Printf("  - InitialA: %d\n", publicInputsRaw.InitialA)
+	fmt.Printf("  - InitialB: %d\n", publicInputsRaw.InitialB)
+	fmt.Printf("  - ExpectedValue: %d\n", publicInputsRaw.ExpectedValue)
+
+	// ╔══════════════════════════════════╗
 	// ║      Build Circuit Structures    ║
 	// ╚══════════════════════════════════╝
 	fmt.Println("\nBuilding circuit structures...")
@@ -105,15 +124,26 @@ func main() {
 	witnessParams := variables.BuildVerificationParams(paramsRaw)
 	circuitData := variables.BuildCircuitData(shapeRaw)
 
+	// Build public inputs
+	publicInputs := BuildFibonacciPublicInputs(publicInputsRaw)
+
 	circuit := GenericVerifierCircuit{
-		Proof:  circuitProof,
-		Params: circuitParams,
-		Shape:  circuitData,
+		Proof:       circuitProof,
+		Params:      circuitParams,
+		Shape:       circuitData,
+		LogSize:     publicInputs.LogSize,
+		InitialA:    publicInputs.InitialA,
+		InitialB:    publicInputs.InitialB,
+		TargetValue: publicInputs.ExpectedValue,
 	}
 	assignment := GenericVerifierCircuit{
-		Proof:  witnessProof,
-		Params: witnessParams,
-		Shape:  circuitData,
+		Proof:       witnessProof,
+		Params:      witnessParams,
+		Shape:       circuitData,
+		LogSize:     publicInputs.LogSize,
+		InitialA:    publicInputs.InitialA,
+		InitialB:    publicInputs.InitialB,
+		TargetValue: publicInputs.ExpectedValue,
 	}
 	fmt.Println("✓ Circuit structures built")
 
@@ -192,7 +222,7 @@ func main() {
 	bn254Proof := proof.(*groth16_bn254.Proof)
 	bn254ProofBytes := bn254Proof.MarshalSolidity()
 	fmt.Printf("Proof bytes (hex): %s\n", hex.EncodeToString(bn254ProofBytes))
-	
+
 	fmt.Printf("Proof bytes raw: %v\n", bn254ProofBytes)
 	// Export using proper gnark serialization
 	err = exportSolidityProofAndWitness(proof, publicWitness)
@@ -225,6 +255,47 @@ func main() {
 	fmt.Println("╔════════════════════════════════════════════════════╗")
 	fmt.Println("║              Verification Complete ✓               ║")
 	fmt.Println("╚════════════════════════════════════════════════════╝")
+}
+
+// FibonacciPublicInputsRaw represents the raw public inputs from JSON
+type FibonacciPublicInputsRaw struct {
+	LogSize       uint64 `json:"logSize"`
+	InitialA      uint64 `json:"initialA"`
+	InitialB      uint64 `json:"initialB"`
+	ExpectedValue uint64 `json:"expectedValue"`
+}
+
+// FibonacciPublicInputs represents the public inputs for the Fibonacci circuit
+type FibonacciPublicInputs struct {
+	LogSize       uints.U64
+	InitialA      uints.U64
+	InitialB      uints.U64
+	ExpectedValue uints.U64
+}
+
+// loadFibonacciPublicInputsRaw loads raw public inputs from a JSON file
+func loadFibonacciPublicInputsRaw(path string) (*FibonacciPublicInputsRaw, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var raw FibonacciPublicInputsRaw
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+
+	return &raw, nil
+}
+
+// BuildFibonacciPublicInputs converts raw public inputs to circuit-ready types
+func BuildFibonacciPublicInputs(raw *FibonacciPublicInputsRaw) *FibonacciPublicInputs {
+	return &FibonacciPublicInputs{
+		LogSize:       uints.NewU64(raw.LogSize),
+		InitialA:      uints.NewU64(raw.InitialA),
+		InitialB:      uints.NewU64(raw.InitialB),
+		ExpectedValue: uints.NewU64(raw.ExpectedValue),
+	}
 }
 
 // Helper function to load StarkProof from JSON
